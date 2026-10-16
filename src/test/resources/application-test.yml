@@ -1,0 +1,31 @@
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 20      # test đồng thời mở nhiều kết nối cùng lúc
+  kafka:
+    consumer:
+      auto-offset-reset: earliest
+
+ticket2h:
+  jobs:
+    enabled: false               # test tự gọi job bằng tay
+  payment:
+    mockpay:
+      api-key: test-api-key
+      webhook-secret: test-webhook-secret
+      connect-timeout: PT1S
+      read-timeout: PT2S
+  # jwt.jwk-set-uri, identity-api.base-url: FakeIdentity (IntegrationTest đặt lúc chạy)
+  identity-api:
+    api-key: test-internal-key-core-0123456789abcdef
+    connect-timeout: PT1S
+    read-timeout: PT2S
+  internal-api:
+    clients:
+      notification-service: test-internal-key-notification-0123456789
+  # qr.private-key / qr.public-keys: sinh ngẫu nhiên lúc chạy test (TestKeys), không commit khoá nào
+
+logging:
+  level:
+    org.apache.kafka: WARN
+    org.springframework.kafka: WARN

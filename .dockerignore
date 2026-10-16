@@ -1,0 +1,9 @@
+# Chỉ gửi những gì cần để build vào Docker
+target/
+.git/
+.github/
+.idea/
+.vscode/
+*.iml
+.env
+*.pem
