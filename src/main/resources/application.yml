@@ -40,7 +40,7 @@ server:
   port: 8080
 
 springdoc:
-  # Mặc định springdoc ghi "*/*" cho mọi response; ghi rõ JSON để kiểu TypeScript sinh ra (web) gọn hơn
+  # Mặc định springdoc ghi "*/*" cho mọi response; ghi rõ JSON để kiểu TypeScript sinh ra (web-app) gọn hơn
   default-produces-media-type: application/json
 
 management:
