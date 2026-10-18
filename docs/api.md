@@ -17,6 +17,9 @@ Xác thực: `Authorization: Bearer <accessToken>` lấy từ `POST /auth/login`
 Token ký RS256, chứa `sub` (userId), `role`, và `organizerId` với tài khoản ORGANIZER. core chỉ kiểm tra token
 (public key lấy từ JWKS của identity), không phát token.
 
+Mô tả máy đọc được (OpenAPI 3, springdoc): `GET /v3/api-docs`, giao diện thử ở `/swagger-ui.html`. Repo web sinh kiểu
+TypeScript từ đây (`npm run api:types`).
+
 Đăng ký, đăng nhập, `GET /me`, `/admin/organizers`, `/admin/users` nay ở identity-service: xem
 [identity-service README](https://github.com/ticket2h/identity-service#readme).
 

@@ -46,7 +46,8 @@ public class SecurityConfig {
      */
     private static final String[] PUBLIC_POST = {"/webhooks/payments/**"};
     private static final String[] PUBLIC_GET = {
-            "/events", "/events/*", "/events/*/seats", "/payments/return", "/ticket-keys", "/actuator/health"};
+            "/events", "/events/*", "/events/*/seats", "/payments/return", "/ticket-keys", "/actuator/health",
+            "/v3/api-docs", "/v3/api-docs/**", "/swagger-ui.html", "/swagger-ui/**"};
 
     /**
      * API cho service khác trong hệ thống (notification-service...), không dành cho người dùng: xác thực bằng

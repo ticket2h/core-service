@@ -5,7 +5,7 @@
 Lõi bán vé của Ticket2h: sự kiện, sơ đồ ghế, giữ chỗ, đơn hàng, thanh toán qua MockPay, phát vé QR, check-in,
 chuyển nhượng. Spring Boot 4.1, Java 25, PostgreSQL 17, Kafka 4, Flyway. Cổng 8080.
 
-Đây là phần lõi của dự án TicketRush M1–M3 (`lo-trinh-backend-java.md`, `ticketrush-m2-m3-huong-dan.md`) sau khi
+Đây là phần lõi của dự án TicketRush M1–M3 (`ticketrush-m2-m3-huong-dan.md`) sau khi
 tách microservice. Email vé đã chuyển sang `notification-service`; tài khoản, đăng nhập và phát JWT sang
 `identity-service` (core chỉ kiểm tra JWT bằng JWKS). Kiến trúc cả hệ thống ở [infra/docs/kien-truc.md](https://github.com/ticket2h/infra/blob/main/docs/kien-truc.md).
 

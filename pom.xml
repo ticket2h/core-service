@@ -74,6 +74,12 @@
 			<version>${zxing.version}</version>
 		</dependency>
 		<dependency>
+			<!-- Mô tả API (OpenAPI 3) ở /v3/api-docs và Swagger UI ở /swagger-ui.html; web sinh kiểu TypeScript từ đây -->
+			<groupId>org.springdoc</groupId>
+			<artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+			<version>3.1.1</version>
+		</dependency>
+		<dependency>
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
 			<scope>runtime</scope>
