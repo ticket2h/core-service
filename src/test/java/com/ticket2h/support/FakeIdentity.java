@@ -27,7 +27,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Thay identity-service trong test: HTTP server của JDK phục vụ JWKS ({@code /.well-known/jwks.json}, public key
- * của {@link TestKeys#JWT}) và {@code POST /internal/users/lookup} theo đúng hợp đồng (infra/docs/contracts.md).
+ * của {@link TestKeys#JWT}), {@code POST /internal/users/lookup} và {@code GET /internal/users/{id}} theo đúng hợp
+ * đồng (infra/docs/contracts.md).
  * Tài khoản test nằm trong bộ nhớ ở đây ({@link TestData#user()}), không còn trong database của core.
  * Một instance cho cả JVM.
  */
@@ -67,6 +68,7 @@ public final class FakeIdentity {
             }
         });
         server.createContext("/internal/users/lookup", this::lookup);
+        server.createContext("/internal/users/", this::byId);   // context dài hơn (lookup) được chọn trước
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
     }
@@ -101,7 +103,18 @@ public final class FakeIdentity {
         return Optional.ofNullable(accounts.get(id));
     }
 
-    /** {@code n} lời tra email tới trả 503, như khi identity-service đang khởi động lại. JWKS không bị ảnh hưởng. */
+    /** Xoá tài khoản, như khi identity xoá người dùng: tra theo id hay email đều 404. */
+    public void remove(UUID id) {
+        Account removed = accounts.remove(id);
+        if (removed != null) {
+            idsByEmail.remove(removed.email().toLowerCase(Locale.ROOT));
+        }
+    }
+
+    /**
+     * {@code n} lời gọi API nội bộ tới ({@code /internal/users/**}: tra email hoặc tra id) trả 503, như khi
+     * identity-service đang khởi động lại. JWKS không bị ảnh hưởng.
+     */
     public void failNext(int n) {
         failuresRemaining.set(n);
     }
@@ -113,30 +126,71 @@ public final class FakeIdentity {
     private void lookup(HttpExchange exchange) throws IOException {
         try (exchange) {
             lookups.incrementAndGet();
-            if (failuresRemaining.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
-                respondJson(exchange, 503, Map.of("code", "UNAVAILABLE"));
-                return;
-            }
-            if (!API_KEY.equals(exchange.getRequestHeaders().getFirst("X-Internal-Api-Key"))) {
-                respondJson(exchange, 401, Map.of("code", "UNAUTHENTICATED"));
+            if (!available(exchange) || !authorized(exchange)) {
                 return;
             }
             JsonNode body = json.readTree(exchange.getRequestBody());
             String email = body.path("email").asString("").trim().toLowerCase(Locale.ROOT);
             UUID id = idsByEmail.get(email);
-            if (id == null) {
+            Account a = id == null ? null : accounts.get(id);
+            if (a == null) {
                 respondJson(exchange, 404, Map.of("code", "NOT_FOUND"));
                 return;
             }
-            Account a = accounts.get(id);
-            Map<String, Object> user = new LinkedHashMap<>();
-            user.put("id", a.id().toString());
-            user.put("email", a.email());
-            user.put("fullName", a.fullName());
-            user.put("role", a.role().name());
-            user.put("organizerId", a.organizerId() == null ? null : a.organizerId().toString());
-            respondJson(exchange, 200, user);
+            respondJson(exchange, 200, userJson(a));
         }
+    }
+
+    /** {@code GET /internal/users/{id}}. Không có tài khoản, hoặc id không phải UUID: 404 như identity thật. */
+    private void byId(HttpExchange exchange) throws IOException {
+        try (exchange) {
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                respondJson(exchange, 405, Map.of("code", "METHOD_NOT_ALLOWED"));
+                return;
+            }
+            if (!available(exchange) || !authorized(exchange)) {
+                return;
+            }
+            String rawId = exchange.getRequestURI().getPath().substring("/internal/users/".length());
+            Account a;
+            try {
+                a = accounts.get(UUID.fromString(rawId));
+            } catch (IllegalArgumentException e) {
+                a = null;
+            }
+            if (a == null) {
+                respondJson(exchange, 404, Map.of("code", "NOT_FOUND"));
+                return;
+            }
+            respondJson(exchange, 200, userJson(a));
+        }
+    }
+
+    /** Còn lượt lỗi do {@link #failNext} thì trả 503. */
+    private boolean available(HttpExchange exchange) throws IOException {
+        if (failuresRemaining.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
+            respondJson(exchange, 503, Map.of("code", "UNAVAILABLE"));
+            return false;
+        }
+        return true;
+    }
+
+    private boolean authorized(HttpExchange exchange) throws IOException {
+        if (!API_KEY.equals(exchange.getRequestHeaders().getFirst("X-Internal-Api-Key"))) {
+            respondJson(exchange, 401, Map.of("code", "UNAUTHENTICATED"));
+            return false;
+        }
+        return true;
+    }
+
+    private static Map<String, Object> userJson(Account a) {
+        Map<String, Object> user = new LinkedHashMap<>();
+        user.put("id", a.id().toString());
+        user.put("email", a.email());
+        user.put("fullName", a.fullName());
+        user.put("role", a.role().name());
+        user.put("organizerId", a.organizerId() == null ? null : a.organizerId().toString());
+        return user;
     }
 
     private void respondJson(HttpExchange exchange, int status, Object body) throws IOException {

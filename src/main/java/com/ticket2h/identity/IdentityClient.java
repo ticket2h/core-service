@@ -4,6 +4,7 @@ import java.net.http.HttpClient;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,7 +22,8 @@ import com.ticket2h.common.error.ErrorCode;
 import com.ticket2h.common.security.Role;
 
 /**
- * Gọi API nội bộ của identity-service (infra/docs/contracts.md). Có timeout (kết nối 2 giây, đọc 5 giây).
+ * Gọi API nội bộ của identity-service (infra/docs/contracts.md): tra tài khoản theo email hoặc theo id.
+ * Có timeout (kết nối 2 giây, đọc 5 giây).
  * KHÔNG gọi bên trong transaction: gọi mạng lúc đang giữ khoá database làm các request khác phải chờ theo.
  * identity không trả lời thì báo 502 {@code IDENTITY_UNAVAILABLE} cho khách, không đổi dữ liệu gì.
  */
@@ -49,12 +51,24 @@ class IdentityClient {
 
     /** Email gửi trong body (POST) chứ không trên URL, để không lọt vào log truy cập. Không có tài khoản → rỗng. */
     Optional<IdentityUser> findByEmail(String email) {
+        return call(() -> rest.post().uri("/internal/users/lookup")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("email", email))
+                .retrieve()
+                .body(IdentityUser.class));
+    }
+
+    /** {@code GET /internal/users/{id}}. Không có tài khoản (ví dụ đã bị xoá) → rỗng. */
+    Optional<IdentityUser> findById(UUID id) {
+        return call(() -> rest.get().uri("/internal/users/{id}", id)
+                .retrieve()
+                .body(IdentityUser.class));
+    }
+
+    /** 404 → rỗng; mã lỗi khác, timeout, không kết nối được → 502 {@code IDENTITY_UNAVAILABLE}. */
+    private static Optional<IdentityUser> call(Supplier<IdentityUser> request) {
         try {
-            return Optional.ofNullable(rest.post().uri("/internal/users/lookup")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of("email", email))
-                    .retrieve()
-                    .body(IdentityUser.class));
+            return Optional.ofNullable(request.get());
         } catch (HttpClientErrorException.NotFound e) {
             return Optional.empty();
         } catch (RestClientResponseException e) {

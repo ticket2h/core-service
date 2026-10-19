@@ -62,7 +62,10 @@ ticket2h:
       base-url: http://localhost:9090
       api-key: ${MOCKPAY_API_KEY}
       webhook-secret: ${MOCKPAY_WEBHOOK_SECRET}
-      return-url: http://localhost:8080/payments/return
+      # Trình duyệt quay về đây sau trang MockPay: core thêm orderId, MockPay thêm merchantRef (id payment) và status.
+      # Mặc định là trang /payments/return của web-app (npm run dev, cổng 5173). Chạy không có web-app thì đặt
+      # http://localhost:8080/payments/return: trang dự phòng của core, chỉ báo "đang xác nhận".
+      return-url: http://localhost:5173/payments/return
       notify-url: http://localhost:8080/webhooks/payments/mockpay
       connect-timeout: PT2S
       read-timeout: PT5S

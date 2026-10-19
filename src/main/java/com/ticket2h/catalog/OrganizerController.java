@@ -108,6 +108,14 @@ class OrganizerController {
         return new StaffResponse(staff.id(), staff.email(), staff.fullName());
     }
 
+    /** Tài khoản đã bị xoá ở identity: {@code email}, {@code fullName} là {@code null} (vẫn gỡ phân công được). */
+    @GetMapping("/events/{eventId}/staff")
+    List<StaffResponse> staff(AuthUser caller, @PathVariable UUID eventId) {
+        return catalog.staff(catalog.organizerOf(caller), eventId).stream()
+                .map(m -> new StaffResponse(m.userId(), m.email(), m.fullName()))
+                .toList();
+    }
+
     @DeleteMapping("/events/{eventId}/staff/{userId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     void removeStaff(AuthUser caller, @PathVariable UUID eventId, @PathVariable UUID userId) {

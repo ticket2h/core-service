@@ -32,8 +32,10 @@ class PaymentController {
     }
 
     /**
-     * Trang MockPay chuyển trình duyệt về sau khi khách bấm nút. CHỈ hiển thị, không đổi trạng thái:
-     * tham số {@code status} trên URL không có chữ ký, ai cũng sửa được. Kết quả thật đến qua webhook.
+     * Trang dự phòng cho {@code ticket2h.payment.mockpay.return-url}: mặc định MockPay chuyển trình duyệt về trang
+     * {@code /payments/return} của web-app (kèm {@code orderId}), trang này chỉ dùng khi ai đó trỏ return-url về
+     * thẳng core (chạy core không có web-app). CHỈ hiển thị, không đổi trạng thái: tham số {@code status} trên URL
+     * không có chữ ký, ai cũng sửa được. Kết quả thật đến qua webhook.
      */
     @GetMapping(path = "/payments/return", produces = MediaType.TEXT_HTML_VALUE)
     String returnPage() {

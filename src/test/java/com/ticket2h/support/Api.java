@@ -53,6 +53,10 @@ public class Api {
         return send(HttpMethod.PUT, path, token, body, Map.of());
     }
 
+    public Response delete(String path, String token) {
+        return send(HttpMethod.DELETE, path, token, null, Map.of());
+    }
+
     /** Gửi body thô (không serialize lại), dùng cho webhook. */
     public Response postRaw(String path, byte[] body, Map<String, String> headers) {
         return exchange(rest.post().uri(path).contentType(MediaType.APPLICATION_JSON)

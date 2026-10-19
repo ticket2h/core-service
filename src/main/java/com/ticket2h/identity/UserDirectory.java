@@ -24,8 +24,19 @@ public class UserDirectory {
 
     /** Tài khoản theo email. Vai trò lạ (identity thêm vai trò mới mà core chưa biết) coi như không tìm thấy. */
     public Optional<UserContact> findByEmail(String email) {
-        return identity.findByEmail(email)
-                .flatMap(u -> u.knownRole().map(role -> new UserContact(u.id(), u.email(), u.fullName(), role)));
+        return identity.findByEmail(email).flatMap(UserDirectory::toContact);
+    }
+
+    /**
+     * Tài khoản theo id, ví dụ để hiện tên nhân viên soát vé (core chỉ lưu id). Không có (tài khoản đã bị xoá) hoặc
+     * vai trò lạ → rỗng. identity không trả lời → {@code IDENTITY_UNAVAILABLE}.
+     */
+    public Optional<UserContact> findById(UUID id) {
+        return identity.findById(id).flatMap(UserDirectory::toContact);
+    }
+
+    private static Optional<UserContact> toContact(IdentityClient.IdentityUser u) {
+        return u.knownRole().map(role -> new UserContact(u.id(), u.email(), u.fullName(), role));
     }
 
     public record UserContact(UUID id, String email, String fullName, Role role) {}

@@ -33,7 +33,8 @@ TypeScript từ đây (`npm run api:types`).
 | POST | `/organizer/events/{id}/ticket-types` | ORGANIZER chủ sự kiện | `{name, kind: SEATED\|GA, price, quantity (GA)}`. Chỉ khi DRAFT |
 | POST | `/organizer/events/{id}/seats` | ORGANIZER chủ sự kiện | `{ticketTypeId, section, rows: [{label, from, to}]}`. Chỉ khi DRAFT |
 | POST | `/organizer/events/{id}/publish` | ORGANIZER chủ sự kiện | Cần ít nhất một loại vé; loại SEATED phải có ghế |
-| POST | `/organizer/events/{id}/staff` | ORGANIZER chủ sự kiện | `{email}` của tài khoản STAFF |
+| GET | `/organizer/events/{id}/staff` | ORGANIZER chủ sự kiện | `[{userId, email, fullName}]`, sắp theo tên rồi email. Email, tên lấy từ identity; tài khoản đã bị xoá: `email`, `fullName` là `null` (xếp cuối, vẫn gỡ được) |
+| POST | `/organizer/events/{id}/staff` | ORGANIZER chủ sự kiện | `{email}` của tài khoản STAFF → 201 `{userId, email, fullName}` |
 | DELETE | `/organizer/events/{id}/staff/{userId}` | ORGANIZER chủ sự kiện | |
 | GET | `/events?q=&page=&size=` | Mọi người | Sự kiện đã công bố. `q` tìm không dấu: "son tung" ra "Sơn Tùng" |
 | GET | `/events/{id}` | Mọi người | Chi tiết, loại vé, số vé còn |
@@ -47,8 +48,8 @@ TypeScript từ đây (`npm run api:types`).
 | GET | `/orders/{orderId}` | Chủ đơn | Người khác nhận 404 |
 | GET | `/me/orders` | Đã đăng nhập | 50 đơn gần nhất |
 | POST | `/orders/{orderId}/cancel` | Chủ đơn | Chỉ khi `PENDING_PAYMENT` |
-| POST | `/orders/{orderId}/payments` | Chủ đơn | Trả `paymentUrl`. 201 phiên mới, 200 phiên đang dùng được |
-| GET | `/payments/return` | Trình duyệt | Chỉ hiển thị, không đổi trạng thái |
+| POST | `/orders/{orderId}/payments` | Chủ đơn | Trả `paymentUrl`. 201 phiên mới, 200 phiên đang dùng được. Xong trang MockPay, trình duyệt về `return-url?orderId=…&merchantRef=<paymentId>&status=…` (mặc định `/payments/return` của web-app) |
+| GET | `/payments/return` | Trình duyệt | Trang dự phòng khi `ticket2h.payment.mockpay.return-url` trỏ về core. Chỉ hiển thị, không đổi trạng thái |
 | POST | `/webhooks/payments/mockpay` | MockPay | Không cần JWT, bắt buộc chữ ký hợp lệ |
 
 ## M3: vé, soát vé
@@ -89,7 +90,7 @@ TypeScript từ đây (`npm run api:types`).
 | `IDEMPOTENCY_KEY_REUSED` | 422 | Cùng key nhưng nội dung khác |
 | `INTERNAL_ERROR` | 500 | Lỗi không lường trước (đã log) |
 | `PAYMENT_GATEWAY_UNAVAILABLE` | 502 | Gọi MockPay thất bại hoặc quá thời gian |
-| `IDENTITY_UNAVAILABLE` | 502 | identity-service không trả lời: lúc tra email (chuyển nhượng, phân công soát vé), hoặc lúc core chưa lấy được public key để kiểm tra token |
+| `IDENTITY_UNAVAILABLE` | 502 | identity-service không trả lời: lúc tra tài khoản (chuyển nhượng, phân công và xem danh sách soát vé), hoặc lúc core chưa lấy được public key để kiểm tra token |
 
 `INVALID_CREDENTIALS`, `EMAIL_ALREADY_REGISTERED` nay do identity-service trả.
 

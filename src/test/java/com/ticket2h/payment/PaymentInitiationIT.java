@@ -10,10 +10,14 @@ import java.util.List;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.web.util.UriComponents;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import com.ticket2h.ordering.CreateOrderRequest;
 import com.ticket2h.support.Api;
 import com.ticket2h.support.IntegrationTest;
+
+import tools.jackson.databind.JsonNode;
 
 /** Bước 9. Cổng thanh toán là FakeGateway (HTTP server trong test), không cần chạy MockPay. */
 class PaymentInitiationIT extends IntegrationTest {
@@ -35,6 +39,10 @@ class PaymentInitiationIT extends IntegrationTest {
         assertThat(gateway.createRequests().getFirst().get("merchantRef").asString())
                 .isEqualTo(response.json().get("paymentId").asString());
         assertThat(gateway.createRequests().getFirst().get("amount").decimalValue()).isEqualByComparingTo("1500000");
+        // merchantRef là id payment; web-app cần id đơn nên core gắn orderId vào return-url (mặc định: web-app)
+        UriComponents returnUrl = returnUrl(gateway.createRequests().getFirst());
+        assertThat(returnUrl.toUriString()).isEqualTo("http://localhost:5173/payments/return?orderId=" + f.orderId);
+        assertThat(returnUrl.getQueryParams().get("orderId")).containsExactly(f.orderId.toString());
     }
 
     @Test
@@ -64,6 +72,12 @@ class PaymentInitiationIT extends IntegrationTest {
 
         // Khách thử lại được
         assertThat(api.post("/orders/" + f.orderId + "/payments", f.token, null).status()).isEqualTo(201);
+        // Payment mới (merchantRef khác) vẫn trả trình duyệt về đúng đơn
+        assertThat(gateway.createRequests()).hasSize(2);
+        assertThat(gateway.createRequests().get(0).get("merchantRef"))
+                .isNotEqualTo(gateway.createRequests().get(1).get("merchantRef"));
+        assertThat(gateway.createRequests()).extracting(r -> returnUrl(r).getQueryParams().getFirst("orderId"))
+                .containsOnly(f.orderId.toString());
     }
 
     @Test
@@ -120,6 +134,10 @@ class PaymentInitiationIT extends IntegrationTest {
         UUID buyer = testData.user();
         UUID orderId = testData.placeOrder(buyer, CreateOrderRequest.seated(event.id(), vip, seats)).order().getId();
         return new Fixture(orderId, testData.token(buyer));
+    }
+
+    private static UriComponents returnUrl(JsonNode createRequest) {
+        return UriComponentsBuilder.fromUriString(createRequest.get("returnUrl").asString()).build();
     }
 
     private Instant timestamp(String sql, UUID id) {

@@ -1,12 +1,15 @@
 package com.ticket2h.catalog;
 
 import java.math.BigDecimal;
+import java.text.Collator;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -34,6 +37,7 @@ import com.ticket2h.identity.UserDirectory.UserContact;
 public class OrganizerCatalogService {
 
     static final ZoneId DEFAULT_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
+    private static final Locale VIETNAMESE = Locale.forLanguageTag("vi-VN");
     private static final int MAX_SEATS_PER_REQUEST = 5_000;
 
     private final CatalogStore store;
@@ -197,6 +201,28 @@ public class OrganizerCatalogService {
         return staff;
     }
 
+    /**
+     * Nhân viên được phân công, kèm email và tên lấy từ identity-service (core chỉ lưu id, ADR-013). KHÔNG có
+     * {@code @Transactional}: kiểm tra quyền và đọc danh sách id (mỗi câu SELECT tự commit), rồi mới hỏi identity
+     * từng người ngoài transaction. Tài khoản đã bị xoá vẫn có trong danh sách với email, tên {@code null}, để BTC
+     * gỡ phân công được. Sắp theo tên (thứ tự tiếng Việt), rồi email; tài khoản không còn xếp cuối.
+     */
+    public List<StaffMember> staff(UUID organizerId, UUID eventId) {
+        ownedEvent(organizerId, eventId);
+        List<UUID> staffIds = store.staffOf(eventId);
+        List<StaffMember> members = new ArrayList<>(staffIds.size());
+        for (UUID id : staffIds) {
+            members.add(users.findById(id)
+                    .map(u -> new StaffMember(id, u.email(), u.fullName()))
+                    .orElseGet(() -> new StaffMember(id, null, null)));
+        }
+        Collator vietnamese = Collator.getInstance(VIETNAMESE);
+        members.sort(Comparator.comparing(StaffMember::fullName, Comparator.nullsLast(vietnamese))
+                .thenComparing(StaffMember::email, Comparator.nullsLast(Comparator.<String>naturalOrder()))
+                .thenComparing(StaffMember::userId));
+        return members;
+    }
+
     @Transactional
     public void removeStaff(UUID organizerId, UUID eventId, UUID staffUserId) {
         ownedEvent(organizerId, eventId);
@@ -266,6 +292,9 @@ public class OrganizerCatalogService {
     }
 
     public record SeatRow(String label, int from, int to) {}
+
+    /** {@code email}, {@code fullName} là {@code null} khi identity không còn tài khoản này. */
+    public record StaffMember(UUID userId, String email, String fullName) {}
 
     public record OrganizerEventDetail(EventRow event, List<TicketTypeRow> ticketTypes,
             Map<UUID, Integer> seatCounts, List<UUID> staffUserIds) {}

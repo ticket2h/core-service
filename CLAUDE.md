@@ -1,7 +1,8 @@
 # Ticket2h core-service
 
 Lõi bán vé của Ticket2h: sự kiện, giữ ghế, đơn hàng, thanh toán, vé, check-in, chuyển nhượng. Tài khoản và JWT ở
-`../identity-service`; core chỉ kiểm tra JWT (RS256, JWKS) và tra email qua API nội bộ của identity.
+`../identity-service`; core chỉ kiểm tra JWT (RS256, JWKS) và tra tài khoản (theo email, theo id) qua API nội bộ
+của identity. Giao diện web ở `../web-app`; MockPay chuyển trình duyệt về `/payments/return` của web (kèm `orderId`).
 Spring Boot 4, Java 25, PostgreSQL, Kafka. Một trong các repo của hệ thống (cạnh `../infra`, `../notification-service`,
 `../mock-payment-gateway`, `../identity-service`); kiến trúc và hợp đồng giữa các service: `../infra/docs/`.
 Hướng dẫn gốc (thời còn tên TicketRush): `../../ticketrush-m2-m3-huong-dan.md` (M2–M3), `../../lo-trinh-backend-java.md` (lộ trình, M1).

@@ -7,6 +7,7 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import com.ticket2h.common.config.Ticket2hProperties;
 import com.ticket2h.common.error.BusinessException;
@@ -54,7 +55,7 @@ public class PaymentInitiation {
             // merchantRef = payment.id: gọi lại cùng merchantRef thì MockPay trả lại phiên cũ
             session = mockPay.createPayment(new CreateSessionRequest(payment.getId().toString(),
                     payment.getAmount(), payment.getCurrency(), "Ticket2h order " + orderId,
-                    config.returnUrl(), config.notifyUrl(), expiresInSeconds));
+                    returnUrlFor(config.returnUrl(), payment.getOrderId()), config.notifyUrl(), expiresInSeconds));
         } catch (MockPayException e) {
             log.warn("Tạo phiên MockPay thất bại cho payment {}: {}", payment.getId(), e.getMessage());
             steps.recordGatewayFailure(payment.getId(), e.getMessage());
@@ -63,6 +64,22 @@ public class PaymentInitiation {
         }
         Payment saved = steps.recordSession(payment.getId(), session.gatewayPaymentId(), session.paymentUrl());
         return new Initiated(saved, prepared.created());
+    }
+
+    /**
+     * return-url đã cấu hình kèm {@code orderId}: MockPay chuyển trình duyệt về
+     * {@code returnUrl?orderId=...&merchantRef=<paymentId>&status=...}, nên web-app biết hiện đơn nào
+     * (merchantRef là id của payment, không phải của đơn). Query có sẵn trong URL cấu hình được giữ nguyên.
+     *
+     * <p>Cùng một payment luôn ra cùng một URL, nên gọi lại MockPay với cùng merchantRef vẫn gửi đúng như lần đầu
+     * (MockPay trả lại phiên cũ, không đổi returnUrl đã lưu). {@code build(true)}: URL cấu hình phải ở dạng đã
+     * encode (MockPay cũng đọc nó như vậy khi chuyển hướng); UUID không có ký tự cần encode.
+     */
+    static String returnUrlFor(String configuredReturnUrl, UUID orderId) {
+        return UriComponentsBuilder.fromUriString(configuredReturnUrl)
+                .queryParam("orderId", orderId)
+                .build(true)
+                .toUriString();
     }
 
     public record Initiated(Payment payment, boolean created) {}

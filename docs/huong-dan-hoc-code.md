@@ -1266,7 +1266,9 @@ Khách ◄── chuyển trình duyệt về returnUrl ("đang xác nhận...")
 
 Hai đường MockPay báo kết quả:
 - **Chuyển trình duyệt về `returnUrl?status=SUCCESS`**: tham số này **không có chữ ký**, khách sửa URL là đổi được.
-  Ticket2h **không tin** nó: `GET /payments/return` chỉ hiện "Đang xác nhận thanh toán…".
+  Ticket2h **không tin** nó: trang `/payments/return` (mặc định của web-app; core có trang dự phòng cùng đường dẫn)
+  chỉ hiện "Đang xác nhận thanh toán…" rồi hỏi trạng thái đơn. Core gắn `orderId` vào `returnUrl` của từng phiên
+  (`PaymentInitiation.returnUrlFor`), vì `merchantRef` MockPay gửi lại là id của payment, không phải của đơn.
 - **Webhook**: MockPay gọi thẳng server-to-server, có chữ ký. Đây là **nguồn sự thật duy nhất**.
 
 ### 10.2. Tạo phiên thanh toán: không gọi HTTP trong transaction

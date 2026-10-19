@@ -47,7 +47,7 @@ ban tổ chức Sky và phân công `staff1` soát vé: 60 ghế VIP (1.500.000�
 ## Test
 
 ```bash
-./mvnw verify                                   # 48 unit test + 122 integration test (*IT)
+./mvnw verify                                   # 50 unit test + 129 integration test (*IT)
 ./mvnw test -Dtest=RequestHashTest              # một class unit test
 ./mvnw verify -Dit.test=SeatClaimConcurrencyIT  # một integration test qua failsafe
 ```
@@ -55,7 +55,7 @@ ban tổ chức Sky và phân công `staff1` soát vé: 60 ghế VIP (1.500.000�
 Integration test chạy Postgres và Kafka thật bằng Testcontainers, nên cần Docker. Lần đầu tải image mất vài phút.
 Lớp cha `IntegrationTest` dọn dữ liệu bằng `TRUNCATE` trước mỗi test (không dùng `@Transactional`, vì sẽ làm test
 đồng thời vô nghĩa). Đồng hồ là `MutableClock`, cổng thanh toán là `FakeGateway` (HTTP server của JDK),
-identity-service là `FakeIdentity` (JWKS với khoá RSA sinh lúc chạy test, tra email). Tài khoản test nằm trong
+identity-service là `FakeIdentity` (JWKS với khoá RSA sinh lúc chạy test, tra tài khoản theo email và theo id). Tài khoản test nằm trong
 `FakeIdentity`, không nằm trong database; `TestData.token` ký JWT RS256 như identity thật.
 
 ## Tiêu chí của từng mốc
@@ -76,7 +76,7 @@ identity-service là `FakeIdentity` (JWKS với khoá RSA sinh lúc chạy test,
 | M3: message trùng không gửi thêm email | `TicketsIssuedEmailIT` (repo notification-service) |
 | Microservice: hợp đồng với notification-service | `TicketEventsContractIT`, `InternalApiIT` |
 | Microservice: chỉ tin JWT do identity ký (RS256), từ chối khoá lạ, HS256, sai issuer | `JwtVerificationIT` |
-| Microservice: identity sập → 502, không đổi dữ liệu; không dò được email | `IdentityOutageIT`, `JwksUnavailableIT` |
+| Microservice: identity sập → 502, không đổi dữ liệu; không dò được email | `IdentityOutageIT`, `JwksUnavailableIT`, `OrganizerStaffApiIT` |
 
 Các test quan trọng nằm trong package `acceptance`: không sửa để cho xanh, sửa code.
 
@@ -92,7 +92,7 @@ Các test quan trọng nằm trong package `acceptance`: không sửa để cho 
   `docker compose start kafka` → mọi đơn có vé.
 - **notification-service sập**: tắt nó, mua vé → đơn vẫn FULFILLED; bật lại → email tới bù.
 - **identity-service sập**: token đã đăng nhập vẫn dùng được (core giữ public key trong bộ nhớ); chuyển nhượng vé,
-  phân công soát vé trả 502 `IDENTITY_UNAVAILABLE` và không đổi dữ liệu.
+  phân công soát vé, xem danh sách soát vé trả 502 `IDENTITY_UNAVAILABLE` và không đổi dữ liệu.
 - **Bất biến dữ liệu**: `docker exec -i ticket2h-postgres-1 psql -U core < scripts/invariants.sql`.
 - **Gọi API nội bộ bằng tay**: `curl -H "X-Internal-Api-Key: $INTERNAL_API_KEY_NOTIFICATION" 'localhost:8080/internal/tickets?ids=<ticketId>'`
   (khoá lấy trong `../infra/.env`; tra tài khoản giờ ở identity-service: `localhost:8082/internal/users/<userId>`).
@@ -103,7 +103,7 @@ Các test quan trọng nằm trong package `acceptance`: không sửa để cho 
 core-service/
 ├── src/main/java/com/ticket2h/
 │   ├── common/        cấu hình, Clock, lỗi (ProblemDetail), kiểm tra JWT (JWKS) và khoá API nội bộ, event Kafka
-│   ├── identity/      client gọi identity-service (tra tài khoản theo email); không còn lưu tài khoản
+│   ├── identity/      client gọi identity-service (tra tài khoản theo email, theo id); không còn lưu tài khoản
 │   ├── catalog/       địa điểm, sự kiện, loại vé, sơ đồ ghế, tìm kiếm không dấu
 │   ├── inventory/     giữ ghế, tồn kho GA, hạn mức mỗi user, sơ đồ ghế công khai
 │   ├── ordering/      đơn hàng, idempotency, hết hạn, huỷ
