@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -28,6 +29,7 @@ import com.ticket2h.catalog.TicketKind;
  */
 @Component
 @Profile("dev")
+@Order(1)   // trước công cụ sinh dữ liệu (profile datagen) nếu bật cả hai
 class DevDataSeeder implements ApplicationRunner {
 
     /** Phải giống {@code DevAccounts} của identity-service (infra/docs/contracts.md, mục dữ liệu mẫu). */

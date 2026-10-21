@@ -7,9 +7,11 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -178,6 +180,17 @@ class CatalogStore {
                 VALUES (:id, :eventId, :ticketTypeId, :section, :rowLabel, :seatNumber)
                 """, batch);
         return counts.length;
+    }
+
+    /** Vị trí mọi ghế đã có của sự kiện (để báo trùng theo từng dòng khi nhập file, trước khi INSERT). */
+    Set<SeatPosition> seatPositions(UUID eventId) {
+        Set<SeatPosition> positions = new HashSet<>();
+        jdbc.query("SELECT section, row_label, seat_number FROM seats WHERE event_id = :eventId",
+                Map.of("eventId", eventId), rs -> {
+                    positions.add(new SeatPosition(rs.getString("section"), rs.getString("row_label"),
+                            rs.getInt("seat_number")));
+                });
+        return positions;
     }
 
     /** Số ghế theo từng loại vé của sự kiện. */

@@ -18,6 +18,7 @@
 	<properties>
 		<java.version>25</java.version>
 		<zxing.version>3.5.3</zxing.version>
+		<skipExportMemoryIT>false</skipExportMemoryIT>
 	</properties>
 
 	<dependencies>
@@ -80,9 +81,9 @@
 			<version>3.1.1</version>
 		</dependency>
 		<dependency>
+			<!-- compile (không phải runtime): công cụ sinh dữ liệu M4 gọi COPY qua API riêng của driver (PGConnection) -->
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
-			<scope>runtime</scope>
 		</dependency>
 
 		<dependency>
@@ -142,6 +143,33 @@
 				<!-- Chạy các class *IT ở phase integration-test/verify (./mvnw verify) -->
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-failsafe-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>default</id>
+						<configuration>
+							<excludes>
+								<exclude>**/ExportMemoryIT.java</exclude>
+							</excludes>
+						</configuration>
+					</execution>
+					<execution>
+						<!-- M4: xuất 500.000 dòng trong heap 256MB. JVM riêng để giới hạn heap thật sự áp dụng cho cả app.
+						     Bỏ qua khi chạy lẻ một test: -DskipExportMemoryIT=true -->
+						<id>export-memory</id>
+						<goals>
+							<goal>integration-test</goal>
+							<goal>verify</goal>
+						</goals>
+						<configuration>
+							<skip>${skipExportMemoryIT}</skip>
+							<test>ExportMemoryIT</test>
+							<argLine>-Xmx256m</argLine>
+							<reportNameSuffix>heap256m</reportNameSuffix>
+							<!-- File tổng kết riêng, không ghi đè kết quả của execution default -->
+							<summaryFile>${project.build.directory}/failsafe-reports/failsafe-summary-heap256m.xml</summaryFile>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 	</build>

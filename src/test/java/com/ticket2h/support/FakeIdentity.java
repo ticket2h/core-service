@@ -27,7 +27,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Thay identity-service trong test: HTTP server của JDK phục vụ JWKS ({@code /.well-known/jwks.json}, public key
- * của {@link TestKeys#JWT}), {@code POST /internal/users/lookup} và {@code GET /internal/users/{id}} theo đúng hợp
+ * của {@link TestKeys#JWT}), {@code POST /internal/users/lookup} và {@code POST /internal/users/batch} theo đúng hợp
  * đồng (infra/docs/contracts.md).
  * Tài khoản test nằm trong bộ nhớ ở đây ({@link TestData#user()}), không còn trong database của core.
  * Một instance cho cả JVM.
@@ -47,7 +47,9 @@ public final class FakeIdentity {
     private final Map<String, UUID> idsByEmail = new ConcurrentHashMap<>();
     private final AtomicInteger failuresRemaining = new AtomicInteger();
     private final AtomicInteger lookups = new AtomicInteger();
+    private final AtomicInteger batches = new AtomicInteger();
     private volatile boolean jwksDown;
+    private volatile boolean synthesizeUnknown;
 
     private FakeIdentity() {
         RSAKey key = new RSAKey.Builder((RSAPublicKey) TestKeys.JWT.getPublic())
@@ -68,7 +70,7 @@ public final class FakeIdentity {
             }
         });
         server.createContext("/internal/users/lookup", this::lookup);
-        server.createContext("/internal/users/", this::byId);   // context dài hơn (lookup) được chọn trước
+        server.createContext("/internal/users/batch", this::batch);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
     }
@@ -86,7 +88,22 @@ public final class FakeIdentity {
         idsByEmail.clear();
         failuresRemaining.set(0);
         lookups.set(0);
+        batches.set(0);
         jwksDown = false;
+        synthesizeUnknown = false;
+    }
+
+    /**
+     * Tra theo lô trả về một tài khoản CUSTOMER dựng từ id cho mọi id chưa đăng ký, không lưu gì vào bộ nhớ. Dùng cho
+     * test xuất 500.000 khách trong heap 256MB: đăng ký trước 500.000 tài khoản thì chính bộ nhớ của fake đã hết chỗ.
+     */
+    public void synthesizeUnknownAccounts(boolean enabled) {
+        this.synthesizeUnknown = enabled;
+    }
+
+    /** Số lần gọi {@code POST /internal/users/batch}. */
+    public int batches() {
+        return batches.get();
     }
 
     /** JWKS trả 503, như khi identity-service tắt. Chỉ có tác dụng với core chưa lấy được JWKS lần nào. */
@@ -103,7 +120,7 @@ public final class FakeIdentity {
         return Optional.ofNullable(accounts.get(id));
     }
 
-    /** Xoá tài khoản, như khi identity xoá người dùng: tra theo id hay email đều 404. */
+    /** Xoá tài khoản, như khi identity xoá người dùng: tra theo email thì 404, tra theo lô thì không có trong lô. */
     public void remove(UUID id) {
         Account removed = accounts.remove(id);
         if (removed != null) {
@@ -112,7 +129,7 @@ public final class FakeIdentity {
     }
 
     /**
-     * {@code n} lời gọi API nội bộ tới ({@code /internal/users/**}: tra email hoặc tra id) trả 503, như khi
+     * {@code n} lời gọi API nội bộ tới ({@code /internal/users/**}: tra email hoặc tra theo lô) trả 503, như khi
      * identity-service đang khởi động lại. JWKS không bị ảnh hưởng.
      */
     public void failNext(int n) {
@@ -141,28 +158,35 @@ public final class FakeIdentity {
         }
     }
 
-    /** {@code GET /internal/users/{id}}. Không có tài khoản, hoặc id không phải UUID: 404 như identity thật. */
-    private void byId(HttpExchange exchange) throws IOException {
+    /** {@code POST /internal/users/batch}: 1..1000 id; id không có tài khoản thì bỏ qua, như identity thật. */
+    private void batch(HttpExchange exchange) throws IOException {
         try (exchange) {
-            if (!"GET".equals(exchange.getRequestMethod())) {
-                respondJson(exchange, 405, Map.of("code", "METHOD_NOT_ALLOWED"));
-                return;
-            }
+            batches.incrementAndGet();
             if (!available(exchange) || !authorized(exchange)) {
                 return;
             }
-            String rawId = exchange.getRequestURI().getPath().substring("/internal/users/".length());
-            Account a;
-            try {
-                a = accounts.get(UUID.fromString(rawId));
-            } catch (IllegalArgumentException e) {
-                a = null;
-            }
-            if (a == null) {
-                respondJson(exchange, 404, Map.of("code", "NOT_FOUND"));
+            JsonNode ids = json.readTree(exchange.getRequestBody()).path("ids");
+            if (!ids.isArray() || ids.isEmpty() || ids.size() > 1_000) {
+                respondJson(exchange, 400, Map.of("code", "VALIDATION_FAILED"));
                 return;
             }
-            respondJson(exchange, 200, userJson(a));
+            java.util.List<Map<String, Object>> users = new java.util.ArrayList<>();
+            java.util.Set<UUID> seen = new java.util.HashSet<>();
+            for (JsonNode node : ids) {
+                UUID id = UUID.fromString(node.asString());
+                if (!seen.add(id)) {
+                    continue;
+                }
+                Account a = accounts.get(id);
+                if (a == null && synthesizeUnknown) {
+                    a = new Account(id, "khach-" + id + "@test.local", "Khách " + id.toString().substring(0, 8),
+                            Role.CUSTOMER, null);
+                }
+                if (a != null) {
+                    users.add(userJson(a));
+                }
+            }
+            respondJson(exchange, 200, Map.of("users", users));
         }
     }
 

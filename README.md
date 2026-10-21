@@ -6,7 +6,7 @@ Lõi bán vé của Ticket2h: sự kiện, sơ đồ ghế, giữ chỗ, đơn h
 chuyển nhượng. Spring Boot 4.1, Java 25, PostgreSQL 17, Kafka 4, Flyway. Cổng 8080.
 
 Đây là phần lõi của dự án TicketRush M1–M3 (`ticketrush-m2-m3-huong-dan.md`) sau khi
-tách microservice. Email vé đã chuyển sang `notification-service`; tài khoản, đăng nhập và phát JWT sang
+tách microservice, cộng thêm M4 (dữ liệu lớn). Email vé đã chuyển sang `notification-service`; tài khoản, đăng nhập và phát JWT sang
 `identity-service` (core chỉ kiểm tra JWT bằng JWKS). Kiến trúc cả hệ thống ở [infra/docs/kien-truc.md](https://github.com/ticket2h/infra/blob/main/docs/kien-truc.md).
 
 Mới học Spring? Đọc [`docs/huong-dan-hoc-code.md`](docs/huong-dan-hoc-code.md): giải thích code và chức năng từ cơ bản.
@@ -44,19 +44,41 @@ tạo với id cố định ([infra/docs/contracts.md](https://github.com/ticket
 ban tổ chức Sky và phân công `staff1` soát vé: 60 ghế VIP (1.500.000đ) và 1.000 vé GA (800.000đ). Log khi khởi
 động in ra `EVENT_ID`, `GA_TYPE_ID`, `VIP_TYPE_ID`.
 
+### Dữ liệu lớn (M4, profile datagen)
+
+Công cụ sinh dữ liệu (`dev/datagen`, ADR-021 ở [infra/docs/adr](https://github.com/ticket2h/infra/tree/main/docs/adr))
+giả lập hệ thống đã chạy 2 năm: 2.000 sự kiện, 10 triệu đơn, thanh toán, vé, 30 triệu lượt quét, và một sự kiện đang
+mở bán 200.000 đơn ("Đại nhạc hội Ticket2h 2026", của ban tổ chức Sky: đăng nhập `organizer1@test.local` để xem báo
+cáo). Người mua là 2 triệu tài khoản do công cụ sinh của identity-service tạo, cùng công thức id (`DatagenIds`).
+Cả hệ thống một lệnh: `../infra/scripts/datagen.sh` (hoặc `--small`). Chạy riêng core bằng `./mvnw`:
+
+```bash
+# identity-service phải sinh tài khoản trước, cùng các con số customers/organizers/staff
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev,datagen \
+  -Dspring-boot.run.arguments="--ticket2h.datagen.orders=1000000 --ticket2h.datagen.checkins=3000000"
+```
+
+Ghi bằng `COPY` (không qua API, không qua nghiệp vụ), mỗi sự kiện một transaction, 4 luồng song song. Bảng tính lại
+được từ bảng gốc (tổng hợp doanh thu, hạn mức mua) được tính bằng SQL sau cùng, nên dữ liệu thoả mọi bất biến
+(`CoreDataGeneratorIT` kiểm tra). Chạy xong thì app tự tắt; database đã có dữ liệu sinh thì không sinh chồng.
+
 ## Test
 
 ```bash
-./mvnw verify                                   # 50 unit test + 129 integration test (*IT)
+./mvnw verify                                   # 55 unit test + 168 integration test + 2 test trong heap 256MB
 ./mvnw test -Dtest=RequestHashTest              # một class unit test
-./mvnw verify -Dit.test=SeatClaimConcurrencyIT  # một integration test qua failsafe
+./mvnw verify -Dit.test=SeatClaimConcurrencyIT -DskipExportMemoryIT=true   # một integration test qua failsafe
 ```
+
+`ExportMemoryIT` (xuất 500.000 dòng) chạy trong một JVM riêng `-Xmx256m` (execution `export-memory` trong `pom.xml`),
+nên giới hạn heap áp dụng thật cho cả app. Khi chạy lẻ một test thì thêm `-DskipExportMemoryIT=true` để bỏ qua nó.
 
 Integration test chạy Postgres và Kafka thật bằng Testcontainers, nên cần Docker. Lần đầu tải image mất vài phút.
 Lớp cha `IntegrationTest` dọn dữ liệu bằng `TRUNCATE` trước mỗi test (không dùng `@Transactional`, vì sẽ làm test
 đồng thời vô nghĩa). Đồng hồ là `MutableClock`, cổng thanh toán là `FakeGateway` (HTTP server của JDK),
-identity-service là `FakeIdentity` (JWKS với khoá RSA sinh lúc chạy test, tra tài khoản theo email và theo id). Tài khoản test nằm trong
-`FakeIdentity`, không nằm trong database; `TestData.token` ký JWT RS256 như identity thật.
+identity-service là `FakeIdentity` (JWKS với khoá RSA sinh lúc chạy test, tra tài khoản theo email và theo lô id). Tài khoản test nằm trong
+`FakeIdentity`, không nằm trong database; `TestData.token` ký JWT RS256 như identity thật. Dữ liệu lớn (hàng trăm
+nghìn đơn, vé, lượt quét) sinh ngay trong PostgreSQL bằng `generate_series` qua `BulkData`.
 
 ## Tiêu chí của từng mốc
 
@@ -74,6 +96,11 @@ identity-service là `FakeIdentity` (JWKS với khoá RSA sinh lúc chạy test,
 | M3: tắt app giữa chừng, khởi động lại → vẫn có vé | `CrashRecoveryIT` |
 | M3: message trùng không tạo thêm vé | `TicketIssuanceIT` |
 | M3: message trùng không gửi thêm email | `TicketsIssuedEmailIT` (repo notification-service) |
+| M4: báo cáo một sự kiện 200.000 đơn dưới 1 giây | `SalesReportPerformanceIT` (đo 4–5 ms; tính thẳng từ bảng đơn 164 ms) |
+| M4: xuất 500.000 dòng với heap 256MB | `ExportMemoryIT` (danh sách khách và lịch sử soát vé, JVM `-Xmx256m`) |
+| M4: import 50.000 ghế, báo đúng các dòng lỗi | `SeatImportIT` (lỗi ở dòng 2, 25.001 và dòng cuối 50.001) |
+| M4: trang thứ 10.000 của danh sách vẫn nhanh | `OrderPagingIT` (keyset đọc 21 dòng index; OFFSET đọc hơn 200.000 dòng) |
+| M4: số liệu báo cáo đúng, theo ngày giờ Việt Nam, không cộng trùng; cột sắp xếp chỉ nhận giá trị cho phép | `SalesReportApiIT` |
 | Microservice: hợp đồng với notification-service | `TicketEventsContractIT`, `InternalApiIT` |
 | Microservice: chỉ tin JWT do identity ký (RS256), từ chối khoá lạ, HS256, sai issuer | `JwtVerificationIT` |
 | Microservice: identity sập → 502, không đổi dữ liệu; không dò được email | `IdentityOutageIT`, `JwksUnavailableIT`, `OrganizerStaffApiIT` |
@@ -92,7 +119,11 @@ Các test quan trọng nằm trong package `acceptance`: không sửa để cho 
   `docker compose start kafka` → mọi đơn có vé.
 - **notification-service sập**: tắt nó, mua vé → đơn vẫn FULFILLED; bật lại → email tới bù.
 - **identity-service sập**: token đã đăng nhập vẫn dùng được (core giữ public key trong bộ nhớ); chuyển nhượng vé,
-  phân công soát vé, xem danh sách soát vé trả 502 `IDENTITY_UNAVAILABLE` và không đổi dữ liệu.
+  phân công soát vé, xem danh sách soát vé, danh sách đơn, tải danh sách khách trả 502 `IDENTITY_UNAVAILABLE` và không
+  đổi dữ liệu.
+- **Kế hoạch truy vấn trên dữ liệu lớn** (sau `../infra/scripts/datagen.sh`): `docker exec -it ticket2h-postgres-1 psql -U core`,
+  rồi `EXPLAIN (ANALYZE, BUFFERS)` các câu trong ADR-016…019 để thấy chỗ khác nhau giữa OFFSET và keyset, giữa tính
+  thẳng và bảng tổng hợp, và partition pruning.
 - **Bất biến dữ liệu**: `docker exec -i ticket2h-postgres-1 psql -U core < scripts/invariants.sql`.
 - **Gọi API nội bộ bằng tay**: `curl -H "X-Internal-Api-Key: $INTERNAL_API_KEY_NOTIFICATION" 'localhost:8080/internal/tickets?ids=<ticketId>'`
   (khoá lấy trong `../infra/.env`; tra tài khoản giờ ở identity-service: `localhost:8082/internal/users/<userId>`).
@@ -102,17 +133,21 @@ Các test quan trọng nằm trong package `acceptance`: không sửa để cho 
 ```
 core-service/
 ├── src/main/java/com/ticket2h/
-│   ├── common/        cấu hình, Clock, lỗi (ProblemDetail), kiểm tra JWT (JWKS) và khoá API nội bộ, event Kafka
-│   ├── identity/      client gọi identity-service (tra tài khoản theo email, theo id); không còn lưu tài khoản
-│   ├── catalog/       địa điểm, sự kiện, loại vé, sơ đồ ghế, tìm kiếm không dấu
+│   ├── common/        cấu hình, Clock, lỗi (ProblemDetail), kiểm tra JWT (JWKS) và khoá API nội bộ, event Kafka,
+│   │                  đọc/ghi CSV (csv/), cursor phân trang keyset (paging/)
+│   ├── identity/      client gọi identity-service (tra tài khoản theo email, theo lô id); không còn lưu tài khoản
+│   ├── catalog/       địa điểm, sự kiện, loại vé, sơ đồ ghế (cả nhập từ file CSV), tìm kiếm không dấu
 │   ├── inventory/     giữ ghế, tồn kho GA, hạn mức mỗi user, sơ đồ ghế công khai
-│   ├── ordering/      đơn hàng, idempotency, hết hạn, huỷ
+│   ├── ordering/      đơn hàng, idempotency, hết hạn, huỷ, kênh bán; danh sách đơn cho ban tổ chức (keyset)
 │   ├── payment/       tạo thanh toán, webhook, hoàn tiền
 │   ├── outbox/        ghi và phát outbox event, cấu hình Kafka
-│   ├── ticketing/     phát vé, QR, check-in, chuyển nhượng; API nội bộ /internal/tickets
-│   └── dev/           dữ liệu mẫu và endpoint chỉ có ở profile dev
-├── src/main/resources/db/migration/   Flyway V1–V2 (M1), V100–V102 (M2), V110–V112 (M3), V113–V114 (tách notification, identity)
-├── docs/                              api.md, schema.md, adr/ (001–010), huong-dan-hoc-code.md
+│   ├── ticketing/     phát vé, QR, check-in, chuyển nhượng; API nội bộ /internal/tickets; file CSV danh sách
+│   │                  khách, lịch sử soát vé; bảng con theo tháng của checkin_logs
+│   ├── reporting/     báo cáo doanh thu: hàng đợi, job cộng dồn vào bảng tổng hợp, API cho ban tổ chức
+│   └── dev/           dữ liệu mẫu và endpoint chỉ có ở profile dev; công cụ sinh dữ liệu lớn (datagen/)
+├── src/main/resources/db/migration/   Flyway V1–V2 (M1), V100–V102 (M2), V110–V112 (M3), V113–V114 (tách notification, identity),
+│                                      V115–V117 (M4)
+├── docs/                              api.md, schema.md, adr/ (001–010, 016–020), huong-dan-hoc-code.md
 ├── scripts/invariants.sql
 ├── Dockerfile, .env.example           image và biến môi trường (CI: .github/workflows/ci.yml)
 └── CLAUDE.md                          quy ước cho agent
@@ -127,6 +162,8 @@ core-service/
 | `PaidOrderSweeper` | 1 phút | Lưới an toàn: đơn PAID quá 5 phút chưa có vé thì phát vé trực tiếp |
 | `OutboxCleanup` | 1 giờ | Xoá outbox đã gửi quá 7 ngày |
 | `OutboxRelay` | 0,5 giây | Đẩy outbox lên Kafka (bật/tắt riêng bằng `ticket2h.outbox.relay.enabled`) |
+| `SalesRollup.applyPending` | 5 giây | Cộng đơn vừa trả tiền vào bảng tổng hợp doanh thu, mỗi lô 500 đơn (ADR-016) |
+| `CheckinLogPartitions` | 1 ngày | Tạo trước bảng con theo tháng của `checkin_logs` cho 3 tháng tới (ADR-019) |
 
 ## Việc để các mốc sau
 

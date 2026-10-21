@@ -44,7 +44,7 @@ TypeScript từ đây (`npm run api:types`).
 | Method | Đường dẫn | Ai gọi | Ghi chú |
 |---|---|---|---|
 | GET | `/events/{eventId}/seats` | Mọi người | Trạng thái hiệu lực; không trả `order_id`, `held_until` |
-| POST | `/orders` | CUSTOMER | Bắt buộc header `Idempotency-Key` (≤ 64 ký tự). 201 lần đầu; gửi lại cùng key và nội dung: 200 + `Idempotent-Replayed: true` |
+| POST | `/orders` | CUSTOMER | Bắt buộc header `Idempotency-Key` (≤ 64 ký tự). 201 lần đầu; gửi lại cùng key và nội dung: 200 + `Idempotent-Replayed: true`. `channel` (M4, tuỳ chọn): `WEB` (mặc định) hoặc `MOBILE_APP`, cho báo cáo doanh thu |
 | GET | `/orders/{orderId}` | Chủ đơn | Người khác nhận 404 |
 | GET | `/me/orders` | Đã đăng nhập | 50 đơn gần nhất |
 | POST | `/orders/{orderId}/cancel` | Chủ đơn | Chỉ khi `PENDING_PAYMENT` |
@@ -63,6 +63,16 @@ TypeScript từ đây (`npm run api:types`).
 | POST | `/checkin` | STAFF được phân công | `{qrToken, gate}` → 200 với `result`: `OK`, `ALREADY_USED`, `TOKEN_REVOKED`, `VOIDED`, `INVALID_TOKEN`; không được phân công → 403 |
 | GET | `/ticket-keys` | Máy soát vé | `{activeKeyId, algorithm, keys: {keyId: base64}}` |
 | GET | `/dev/tickets/{ticketId}/qr-token` | Chủ vé, **chỉ profile dev** | Chuỗi token QR để thử check-in bằng curl |
+
+## M4: báo cáo, danh sách lớn, file
+
+| Method | Đường dẫn | Ai gọi | Ghi chú |
+|---|---|---|---|
+| GET | `/organizer/events/{id}/sales?groupBy=&sort=&direction=&from=&to=` | ORGANIZER chủ sự kiện | Doanh thu từ bảng tổng hợp (chậm hơn thực tế tối đa ~5 giây, ADR-016). `groupBy`: `DAY` (mặc định, ngày theo múi giờ sự kiện), `TICKET_TYPE`, `CHANNEL`. `sort`: `KEY`, `ORDERS`, `TICKETS`, `REVENUE`; `direction`: `ASC`, `DESC`; giá trị khác → 400. Trả `totals {orders, tickets, revenue}` và `rows [{key, label, orders, tickets, revenue}]`; `orders` là `null` khi gom theo loại vé |
+| GET | `/organizer/events/{id}/orders?status=&limit=&cursor=` | ORGANIZER chủ sự kiện | Đơn mới trước, phân trang keyset (ADR-018): trang sau gửi lại `nextCursor`; `nextCursor: null` là hết. `limit` 1–100 (mặc định 20). Mỗi đơn kèm `buyer {fullName, email}` (hỏi identity theo lô; `null` khi tài khoản không còn). Không có tổng số |
+| GET | `/organizer/events/{id}/attendees.csv` | ORGANIZER chủ sự kiện | Danh sách khách, mỗi vé còn hiệu lực một dòng, UTF-8 có BOM. Đọc theo lô 1.000 vé (ADR-017): 500.000 dòng với heap 256MB. Lỗi trước dòng đầu (403, 502...) vẫn là JSON; lỗi giữa chừng thành dòng `# LỖI` cuối file |
+| GET | `/organizer/events/{id}/checkins.csv?from=&to=` | ORGANIZER chủ sự kiện | Lịch sử soát vé trong khoảng ngày (theo múi giờ sự kiện, tối đa 31 ngày; mặc định ngày diễn ±1). Đọc theo luồng bằng cursor của PostgreSQL (fetch size) |
+| POST | `/organizer/events/{id}/seats/import` | ORGANIZER chủ sự kiện | Body là file CSV (`Content-Type: text/csv`, UTF-8, ≤ 5MB, ≤ 100.000 ghế), tiêu đề `loai_ve,khu,hang,so_ghe`. 201 `{created, ticketTypes: [{ticketType, created}]}`. Có lỗi thì không thêm ghế nào: 422 `SEAT_IMPORT_INVALID` (ADR-020). Chỉ khi DRAFT |
 
 ## Mã lỗi
 
@@ -86,11 +96,12 @@ TypeScript từ đây (`npm run api:types`).
 | `PAYMENT_ATTEMPTS_EXCEEDED` | 409 | Tạo quá nhiều phiên thanh toán (mặc định 3) |
 | `TICKET_NOT_TRANSFERABLE` | 409 | Vé đã dùng, trong vòng 2 giờ trước giờ diễn… |
 | `TICKET_NOT_VALID` | 409 | Lấy QR của vé đã dùng hoặc đã huỷ |
-| `PAYLOAD_TOO_LARGE` | 413 | Webhook lớn hơn 64KB |
+| `PAYLOAD_TOO_LARGE` | 413 | Webhook lớn hơn 64KB; file ghế lớn hơn 5MB |
 | `IDEMPOTENCY_KEY_REUSED` | 422 | Cùng key nhưng nội dung khác |
+| `SEAT_IMPORT_INVALID` | 422 | File ghế có lỗi: kèm `errors` (tối đa 200 lỗi đầu, mỗi lỗi `{line, message}`, sắp theo dòng) và `errorCount` (tổng số lỗi). Không ghế nào được thêm |
 | `INTERNAL_ERROR` | 500 | Lỗi không lường trước (đã log) |
 | `PAYMENT_GATEWAY_UNAVAILABLE` | 502 | Gọi MockPay thất bại hoặc quá thời gian |
-| `IDENTITY_UNAVAILABLE` | 502 | identity-service không trả lời: lúc tra tài khoản (chuyển nhượng, phân công và xem danh sách soát vé), hoặc lúc core chưa lấy được public key để kiểm tra token |
+| `IDENTITY_UNAVAILABLE` | 502 | identity-service không trả lời: lúc tra tài khoản (chuyển nhượng, phân công, danh sách nhân viên, danh sách đơn, file danh sách khách), hoặc lúc core chưa lấy được public key để kiểm tra token |
 
 `INVALID_CREDENTIALS`, `EMAIL_ALREADY_REGISTERED` nay do identity-service trả.
 

@@ -1,6 +1,8 @@
 package com.ticket2h.identity;
 
 import java.net.http.HttpClient;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -22,13 +24,15 @@ import com.ticket2h.common.error.ErrorCode;
 import com.ticket2h.common.security.Role;
 
 /**
- * Gọi API nội bộ của identity-service (infra/docs/contracts.md): tra tài khoản theo email hoặc theo id.
+ * Gọi API nội bộ của identity-service (infra/docs/contracts.md): tra tài khoản theo email, hoặc theo lô id.
  * Có timeout (kết nối 2 giây, đọc 5 giây).
  * KHÔNG gọi bên trong transaction: gọi mạng lúc đang giữ khoá database làm các request khác phải chờ theo.
  * identity không trả lời thì báo 502 {@code IDENTITY_UNAVAILABLE} cho khách, không đổi dữ liệu gì.
  */
 @Component
 class IdentityClient {
+
+    static final int MAX_BATCH = 1_000;
 
     private static final Logger log = LoggerFactory.getLogger(IdentityClient.class);
 
@@ -58,15 +62,25 @@ class IdentityClient {
                 .body(IdentityUser.class));
     }
 
-    /** {@code GET /internal/users/{id}}. Không có tài khoản (ví dụ đã bị xoá) → rỗng. */
-    Optional<IdentityUser> findById(UUID id) {
-        return call(() -> rest.get().uri("/internal/users/{id}", id)
+    /**
+     * {@code POST /internal/users/batch}, tối đa {@value #MAX_BATCH} id. id không có tài khoản thì không có trong kết
+     * quả. identity không trả lời → 502 {@code IDENTITY_UNAVAILABLE}.
+     */
+    List<IdentityUser> findByIds(Collection<UUID> ids) {
+        if (ids.size() > MAX_BATCH) {
+            throw new IllegalArgumentException("Tối đa " + MAX_BATCH + " id mỗi lần, nhận " + ids.size());
+        }
+        return call(() -> rest.post().uri("/internal/users/batch")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("ids", ids))
                 .retrieve()
-                .body(IdentityUser.class));
+                .body(Batch.class))
+                .map(Batch::users)
+                .orElse(List.of());
     }
 
     /** 404 → rỗng; mã lỗi khác, timeout, không kết nối được → 502 {@code IDENTITY_UNAVAILABLE}. */
-    private static Optional<IdentityUser> call(Supplier<IdentityUser> request) {
+    private static <T> Optional<T> call(Supplier<T> request) {
         try {
             return Optional.ofNullable(request.get());
         } catch (HttpClientErrorException.NotFound e) {
@@ -84,6 +98,8 @@ class IdentityClient {
         return new BusinessException(ErrorCode.IDENTITY_UNAVAILABLE,
                 "Dịch vụ tài khoản tạm thời không phản hồi, vui lòng thử lại");
     }
+
+    record Batch(List<IdentityUser> users) {}
 
     /** Body trả về của identity. {@code role} để dạng chuỗi: identity thêm vai trò mới thì core vẫn đọc được. */
     record IdentityUser(UUID id, String email, String fullName, String role, UUID organizerId) {

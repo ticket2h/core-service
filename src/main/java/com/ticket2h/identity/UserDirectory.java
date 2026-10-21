@@ -1,5 +1,10 @@
 package com.ticket2h.identity;
 
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -28,11 +33,20 @@ public class UserDirectory {
     }
 
     /**
-     * Tài khoản theo id, ví dụ để hiện tên nhân viên soát vé (core chỉ lưu id). Không có (tài khoản đã bị xoá) hoặc
-     * vai trò lạ → rỗng. identity không trả lời → {@code IDENTITY_UNAVAILABLE}.
+     * Nhiều tài khoản theo id (tên nhân viên soát vé, khách trong file xuất; core chỉ lưu id), chia thành lô 1.000 id
+     * mỗi lần gọi identity. id không có tài khoản (đã xoá) hoặc vai trò
+     * lạ thì không có trong kết quả. identity không trả lời → {@code IDENTITY_UNAVAILABLE}.
      */
-    public Optional<UserContact> findById(UUID id) {
-        return identity.findById(id).flatMap(UserDirectory::toContact);
+    public Map<UUID, UserContact> findByIds(Collection<UUID> ids) {
+        List<UUID> distinct = List.copyOf(new LinkedHashSet<>(ids));
+        Map<UUID, UserContact> contacts = new HashMap<>(distinct.size() * 2);
+        for (int from = 0; from < distinct.size(); from += IdentityClient.MAX_BATCH) {
+            List<UUID> chunk = distinct.subList(from, Math.min(distinct.size(), from + IdentityClient.MAX_BATCH));
+            for (IdentityClient.IdentityUser user : identity.findByIds(chunk)) {
+                toContact(user).ifPresent(contact -> contacts.put(contact.id(), contact));
+            }
+        }
+        return contacts;
     }
 
     private static Optional<UserContact> toContact(IdentityClient.IdentityUser u) {

@@ -12,6 +12,10 @@ spring:
     url: jdbc:postgresql://localhost:5432/core
     username: core
     password: core
+    hikari:
+      data-source-properties:
+        # Driver gộp một lô INSERT (JDBC batch) thành vài câu INSERT nhiều dòng: nhập 50.000 ghế nhanh hơn nhiều lần
+        reWriteBatchedInserts: true
   jpa:
     open-in-view: false
     hibernate:

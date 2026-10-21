@@ -13,11 +13,20 @@ import jakarta.validation.constraints.Size;
 
 /**
  * Body của {@code POST /orders}. Không có trường giá: giá do server quyết định. Client gửi kèm
- * {@code price} thì Jackson bỏ qua trường lạ.
+ * {@code price} thì Jackson bỏ qua trường lạ. {@code channel} (kênh bán, cho báo cáo) không gửi thì là WEB.
  */
 public record CreateOrderRequest(
         @NotNull UUID eventId,
-        @NotEmpty @Size(max = 10) List<@Valid @NotNull Item> items) {
+        @NotEmpty @Size(max = 10) List<@Valid @NotNull Item> items,
+        SalesChannel channel) {
+
+    public SalesChannel salesChannel() {
+        return channel == null ? SalesChannel.WEB : channel;
+    }
+
+    public CreateOrderRequest withChannel(SalesChannel newChannel) {
+        return new CreateOrderRequest(eventId, items, newChannel);
+    }
 
     /** SEATED: có {@code seatIds}, không có {@code quantity}. GA: có {@code quantity}, không có {@code seatIds}. */
     public record Item(
@@ -39,7 +48,7 @@ public record CreateOrderRequest(
     }
 
     public static CreateOrderRequest of(UUID eventId, Item... items) {
-        return new CreateOrderRequest(eventId, Arrays.asList(items));
+        return new CreateOrderRequest(eventId, Arrays.asList(items), null);
     }
 
     public static CreateOrderRequest ga(UUID eventId, UUID ticketTypeId, int quantity) {

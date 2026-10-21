@@ -7,7 +7,9 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -39,6 +41,8 @@ public class OrganizerCatalogService {
     static final ZoneId DEFAULT_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
     private static final Locale VIETNAMESE = Locale.forLanguageTag("vi-VN");
     private static final int MAX_SEATS_PER_REQUEST = 5_000;
+    /** Số dòng mỗi lần gửi INSERT theo lô (JDBC batch) khi nhập ghế từ file. */
+    private static final int INSERT_BATCH = 1_000;
 
     private final CatalogStore store;
     private final UserDirectory users;
@@ -188,6 +192,67 @@ public class OrganizerCatalogService {
     }
 
     /**
+     * Bước hai của nhập ghế từ file ({@link SeatImport}): kiểm tra các dòng với database rồi thêm tất cả, trong một
+     * transaction. Khoá sự kiện trước (như {@link #addSeats}), nên hai lần nhập cùng lúc chạy lần lượt và lần sau thấy
+     * ghế của lần trước. {@code errors} đã có lỗi của bước một thì vẫn kiểm tra tiếp để báo đủ, nhưng không thêm gì.
+     */
+    @Transactional
+    public SeatImport.ImportResult importSeats(UUID organizerId, UUID eventId, List<SeatImport.SeatLine> lines,
+            SeatImport.Errors errors) {
+        EventRow event = lockOwnedEvent(organizerId, eventId);
+        requireDraft(event);
+        List<TicketTypeRow> types = store.ticketTypesOf(eventId);
+        Set<SeatPosition> existing = store.seatPositions(eventId);
+        Map<SeatPosition, Integer> firstLine = new HashMap<>();
+        Map<TicketTypeRow, List<SeatPosition>> toInsert = new LinkedHashMap<>();
+        for (SeatImport.SeatLine line : lines) {
+            TicketTypeRow type = ticketTypeNamed(types, line.ticketType());
+            if (type == null) {
+                errors.add(line.line(), "Không có loại vé \"" + line.ticketType() + "\" trong sự kiện");
+                continue;
+            }
+            if (type.kind() != TicketKind.SEATED) {
+                errors.add(line.line(), "Loại vé \"" + type.name() + "\" là vé đứng (GA), không có ghế");
+                continue;
+            }
+            SeatPosition position = new SeatPosition(line.section(), line.row(), line.number());
+            Integer seen = firstLine.putIfAbsent(position, line.line());
+            if (seen != null) {
+                errors.add(line.line(), "Trùng ghế với dòng " + seen);
+            } else if (existing.contains(position)) {
+                errors.add(line.line(), "Ghế đã có trong sơ đồ");
+            } else {
+                toInsert.computeIfAbsent(type, t -> new ArrayList<>()).add(position);
+            }
+        }
+        if (errors.count() > 0) {
+            throw errors.failure();
+        }
+        Map<String, Integer> byTicketType = new LinkedHashMap<>();
+        int created = 0;
+        for (Map.Entry<TicketTypeRow, List<SeatPosition>> entry : toInsert.entrySet()) {
+            List<SeatPosition> positions = entry.getValue();
+            for (int from = 0; from < positions.size(); from += INSERT_BATCH) {
+                created += store.insertSeats(eventId, entry.getKey().id(),
+                        positions.subList(from, Math.min(positions.size(), from + INSERT_BATCH)));
+            }
+            byTicketType.put(entry.getKey().name(), positions.size());
+        }
+        return new SeatImport.ImportResult(created, byTicketType);
+    }
+
+    /** Đúng tên trước; không có thì so không phân biệt hoa thường, nếu chỉ khớp đúng một loại vé. */
+    private static TicketTypeRow ticketTypeNamed(List<TicketTypeRow> types, String name) {
+        for (TicketTypeRow type : types) {
+            if (type.name().equals(name)) {
+                return type;
+            }
+        }
+        List<TicketTypeRow> ignoringCase = types.stream().filter(t -> t.name().equalsIgnoreCase(name)).toList();
+        return ignoringCase.size() == 1 ? ignoringCase.getFirst() : null;
+    }
+
+    /**
      * KHÔNG có {@code @Transactional}: tra email là lời gọi HTTP sang identity-service, không được nằm trong
      * transaction. Kiểm tra quyền trước (BTC khác nhận 403 mà không dò được email nào tồn tại), rồi tra email,
      * rồi một câu INSERT tự commit (ON CONFLICT DO NOTHING: phân công hai lần vẫn một dòng).
@@ -204,17 +269,19 @@ public class OrganizerCatalogService {
     /**
      * Nhân viên được phân công, kèm email và tên lấy từ identity-service (core chỉ lưu id, ADR-013). KHÔNG có
      * {@code @Transactional}: kiểm tra quyền và đọc danh sách id (mỗi câu SELECT tự commit), rồi mới hỏi identity
-     * từng người ngoài transaction. Tài khoản đã bị xoá vẫn có trong danh sách với email, tên {@code null}, để BTC
-     * gỡ phân công được. Sắp theo tên (thứ tự tiếng Việt), rồi email; tài khoản không còn xếp cuối.
+     * ngoài transaction, một lần cho cả danh sách. Tài khoản đã bị xoá vẫn có trong danh sách với email, tên
+     * {@code null}, để BTC gỡ phân công được. Sắp theo tên (thứ tự tiếng Việt), rồi email; tài khoản không còn xếp
+     * cuối.
      */
     public List<StaffMember> staff(UUID organizerId, UUID eventId) {
         ownedEvent(organizerId, eventId);
         List<UUID> staffIds = store.staffOf(eventId);
+        Map<UUID, UserContact> contacts = staffIds.isEmpty() ? Map.of() : users.findByIds(staffIds);
         List<StaffMember> members = new ArrayList<>(staffIds.size());
         for (UUID id : staffIds) {
-            members.add(users.findById(id)
-                    .map(u -> new StaffMember(id, u.email(), u.fullName()))
-                    .orElseGet(() -> new StaffMember(id, null, null)));
+            UserContact contact = contacts.get(id);
+            members.add(contact == null ? new StaffMember(id, null, null)
+                    : new StaffMember(id, contact.email(), contact.fullName()));
         }
         Collator vietnamese = Collator.getInstance(VIETNAMESE);
         members.sort(Comparator.comparing(StaffMember::fullName, Comparator.nullsLast(vietnamese))

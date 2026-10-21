@@ -18,7 +18,7 @@ import tools.jackson.databind.JsonNode;
 
 /**
  * {@code GET /organizer/events/{id}/staff}: core chỉ lưu id nhân viên, email và tên hỏi identity-service
- * ({@code GET /internal/users/{id}}) sau khi đọc xong danh sách, ngoài transaction.
+ * ({@code POST /internal/users/batch}, một lần cho cả danh sách) sau khi đọc xong danh sách, ngoài transaction.
  */
 class OrganizerStaffApiIT extends IntegrationTest {
 
@@ -35,9 +35,11 @@ class OrganizerStaffApiIT extends IntegrationTest {
         EventRef other = testData.eventOnSale(e -> {});
         assign(other, testData.token(other.organizer().userId()), "khac@test.local", "An");
 
+        int batchesBefore = identity.batches();
         Api.Response response = api.get(staffPath(event), org);
 
         assertThat(response.status()).isEqualTo(200);
+        assertThat(identity.batches() - batchesBefore).as("số lần hỏi identity cho 5 nhân viên").isEqualTo(1);
         List<JsonNode> items = response.json().valueStream().toList();
         // Thứ tự tiếng Việt: Á sau A, trước B; Đ sau D (so chuỗi thường thì "Ánh", "Đức" xếp sau "Z")
         assertThat(items).extracting(i -> i.get("userId").asString())

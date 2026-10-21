@@ -1,5 +1,6 @@
 package com.ticket2h.catalog;
 
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -28,6 +29,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+
 import com.ticket2h.catalog.OrganizerCatalogService.EventFields;
 import com.ticket2h.catalog.OrganizerCatalogService.OrganizerEventDetail;
 import com.ticket2h.catalog.OrganizerCatalogService.SeatRow;
@@ -40,9 +44,11 @@ import com.ticket2h.identity.UserDirectory.UserContact;
 class OrganizerController {
 
     private final OrganizerCatalogService catalog;
+    private final SeatImport seatImport;
 
-    OrganizerController(OrganizerCatalogService catalog) {
+    OrganizerController(OrganizerCatalogService catalog, SeatImport seatImport) {
         this.catalog = catalog;
+        this.seatImport = seatImport;
     }
 
     @PostMapping("/venues")
@@ -99,6 +105,23 @@ class OrganizerController {
         int created = catalog.addSeats(catalog.organizerOf(caller), eventId, request.ticketTypeId(),
                 request.section(), rows);
         return new SeatsCreatedResponse(created);
+    }
+
+    /**
+     * Nhập ghế từ file CSV ({@code Content-Type: text/csv}, UTF-8, tối đa 5MB và 100.000 ghế), dòng tiêu đề
+     * {@code loai_ve,khu,hang,so_ghe}. File có lỗi thì không thêm ghế nào: 422 {@code SEAT_IMPORT_INVALID} kèm
+     * {@code errors} (mỗi lỗi một {@code line}, {@code message}) và {@code errorCount}.
+     */
+    @PostMapping(value = "/events/{eventId}/seats/import",
+            consumes = {"text/csv", "text/plain", "application/vnd.ms-excel", "application/octet-stream"})
+    @ResponseStatus(HttpStatus.CREATED)
+    // Tham số InputStream (đọc thẳng body) không tự có trong OpenAPI: khai báo để web sinh đúng kiểu
+    @io.swagger.v3.oas.annotations.parameters.RequestBody(required = true,
+            content = @Content(mediaType = "text/csv", schema = @Schema(type = "string")))
+    SeatImportResponse importSeats(AuthUser caller, @PathVariable UUID eventId, InputStream body) {
+        SeatImport.ImportResult result = seatImport.importCsv(catalog.organizerOf(caller), eventId, body);
+        return new SeatImportResponse(result.created(), result.byTicketType().entrySet().stream()
+                .map(e -> new SeatImportCount(e.getKey(), e.getValue())).toList());
     }
 
     @PostMapping("/events/{eventId}/staff")
@@ -180,6 +203,10 @@ class OrganizerController {
     record RowRequest(@NotBlank @Size(max = 10) String label, @Min(1) int from, @Min(1) int to) {}
 
     record SeatsCreatedResponse(int created) {}
+
+    record SeatImportResponse(int created, List<SeatImportCount> ticketTypes) {}
+
+    record SeatImportCount(String ticketType, int created) {}
 
     record StaffRequest(@NotBlank @Email String email) {}
 

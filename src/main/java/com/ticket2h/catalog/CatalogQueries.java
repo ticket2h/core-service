@@ -7,6 +7,9 @@ import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 
+import com.ticket2h.common.error.ForbiddenException;
+import com.ticket2h.common.error.NotFoundException;
+
 /** API đọc công khai của module catalog cho các module khác. Không khoá dữ liệu. */
 @Service
 public class CatalogQueries {
@@ -20,6 +23,18 @@ public class CatalogQueries {
     public Optional<EventSnapshot> findEvent(UUID eventId) {
         return store.findEvent(eventId).map(e -> new EventSnapshot(e.id(), e.organizerId(), e.title(), e.status(),
                 e.startsAt(), e.saleOpensAt(), e.saleClosesAt(), e.maxTicketsPerUser(), e.timeZone()));
+    }
+
+    /**
+     * Sự kiện của đúng ban tổ chức đang gọi, cho các API ban tổ chức ở module khác (báo cáo, xuất file). Cùng quy tắc
+     * với {@link OrganizerCatalogService}: không có thì 404, thuộc ban tổ chức khác thì 403.
+     */
+    public EventSnapshot ownedEvent(UUID organizerId, UUID eventId) {
+        EventSnapshot event = findEvent(eventId).orElseThrow(() -> new NotFoundException("sự kiện"));
+        if (!event.organizerId().equals(organizerId)) {
+            throw new ForbiddenException("Sự kiện thuộc ban tổ chức khác");
+        }
+        return event;
     }
 
     public List<TicketTypeInfo> ticketTypes(UUID eventId) {

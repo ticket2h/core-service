@@ -37,6 +37,10 @@ public class Order extends AssignedIdEntity {
     @Column(updatable = false)
     private String currency;
 
+    @Enumerated(EnumType.STRING)
+    @Column(updatable = false)
+    private SalesChannel salesChannel;
+
     @Column(updatable = false)
     private String idempotencyKey;
 
@@ -54,11 +58,12 @@ public class Order extends AssignedIdEntity {
 
     protected Order() {}
 
-    private Order(UUID id, UUID userId, UUID eventId, String idempotencyKey, String requestHash,
-            BigDecimal totalAmount, Instant now, Instant expiresAt) {
+    private Order(UUID id, UUID userId, UUID eventId, SalesChannel salesChannel, String idempotencyKey,
+            String requestHash, BigDecimal totalAmount, Instant now, Instant expiresAt) {
         super(id);
         this.userId = userId;
         this.eventId = eventId;
+        this.salesChannel = salesChannel;
         this.status = OrderStatus.PENDING_PAYMENT;
         this.totalAmount = totalAmount;
         this.currency = DEFAULT_CURRENCY;
@@ -69,10 +74,10 @@ public class Order extends AssignedIdEntity {
         this.updatedAt = now;
     }
 
-    public static Order pending(UUID userId, UUID eventId, String idempotencyKey, String requestHash,
-            BigDecimal totalAmount, Instant now, Instant expiresAt) {
-        return new Order(UUID.randomUUID(), userId, eventId, idempotencyKey, requestHash, totalAmount, now,
-                expiresAt);
+    public static Order pending(UUID userId, UUID eventId, SalesChannel salesChannel, String idempotencyKey,
+            String requestHash, BigDecimal totalAmount, Instant now, Instant expiresAt) {
+        return new Order(UUID.randomUUID(), userId, eventId, salesChannel, idempotencyKey, requestHash, totalAmount,
+                now, expiresAt);
     }
 
     public void markPaid(Instant now) {
@@ -126,6 +131,10 @@ public class Order extends AssignedIdEntity {
 
     public OrderStatus getStatus() {
         return status;
+    }
+
+    public SalesChannel getSalesChannel() {
+        return salesChannel;
     }
 
     public BigDecimal getTotalAmount() {

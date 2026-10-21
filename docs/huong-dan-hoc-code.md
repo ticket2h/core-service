@@ -7,6 +7,9 @@ của Ticket2h bằng chính code trong repo.
 Mọi đường dẫn file tính từ `src/main/java/com/ticket2h/` nếu không ghi khác. Code trích ở đây đôi khi được
 rút gọn (`...`) để dễ đọc; mở file thật để xem đầy đủ.
 
+> **Cập nhật 2026-10-21: M4 (dữ liệu lớn)** có ở mục 12: báo cáo doanh thu, phân trang keyset, xuất file 500.000 dòng,
+> nhập 50.000 ghế, partition bảng log, công cụ sinh 10 triệu đơn.
+>
 > **Cập nhật 2026-10-16: hệ thống bắt đầu tách thành microservice.** Tài liệu này viết khi mọi thứ còn nằm trong
 > một ứng dụng (TicketRush M1–M3). Ứng dụng đó nay là **core-service** (repo này). Phần **gửi email** đã chuyển sang
 > repo `notification-service`, MockPay thành repo `mock-payment-gateway`. Hầu hết nội dung vẫn đúng, chỉ khác:
@@ -35,9 +38,10 @@ rút gọn (`...`) để dễ đọc; mở file thật để xem đầy đủ.
 9. [M2: tạo đơn, idempotency, hết hạn, huỷ](#9-m2-tạo-đơn-idempotency-hết-hạn-huỷ)
 10. [M2: thanh toán, webhook, hoàn tiền](#10-m2-thanh-toán-webhook-hoàn-tiền)
 11. [M3: outbox, Kafka, vé, QR, email, check-in, chuyển nhượng](#11-m3-outbox-kafka-vé-qr-email-check-in-chuyển-nhượng)
-12. [Test](#12-test)
-13. [Bài tập thực hành và câu hỏi tự kiểm tra](#13-bài-tập-thực-hành-và-câu-hỏi-tự-kiểm-tra)
-14. [Thuật ngữ](#14-thuật-ngữ)
+12. [M4: dữ liệu lớn](#12-m4-dữ-liệu-lớn)
+13. [Test](#13-test)
+14. [Bài tập thực hành và câu hỏi tự kiểm tra](#14-bài-tập-thực-hành-và-câu-hỏi-tự-kiểm-tra)
+15. [Thuật ngữ](#15-thuật-ngữ)
 
 ---
 
@@ -45,7 +49,7 @@ rút gọn (`...`) để dễ đọc; mở file thật để xem đầy đủ.
 
 ### Đọc theo thứ tự nào
 
-Đừng mở file ngẫu nhiên. Đi theo 5 chặng, mỗi chặng chạy được và thấy kết quả:
+Đừng mở file ngẫu nhiên. Đi theo 6 chặng, mỗi chặng chạy được và thấy kết quả:
 
 | Chặng | Đọc mục | Mở các file | Bạn sẽ hiểu |
 |---|---|---|---|
@@ -53,7 +57,8 @@ rút gọn (`...`) để dễ đọc; mở file thật để xem đầy đủ.
 | 2 | 4, 5, 6 | `identity/*`, `common/error/*`, `common/security/*` | Một request HTTP đi qua những lớp nào |
 | 3 | 7 | `catalog/*` | CRUD có kiểm tra quyền, SQL thuần |
 | 4 | 8, 9, 10 | `inventory/*`, `ordering/*`, `payment/*` | Bán vé đúng khi hàng nghìn người cùng bấm |
-| 5 | 11, 12 | `outbox/*`, `ticketing/*`, [notification-service](https://github.com/ticket2h/notification-service), `src/test/**` | Hệ thống nhiều thành phần, và cách test nó |
+| 5 | 11, 13 | `outbox/*`, `ticketing/*`, [notification-service](https://github.com/ticket2h/notification-service), `src/test/**` | Hệ thống nhiều thành phần, và cách test nó |
+| 6 | 12 | `dev/datagen/*`, `reporting/*`, `ordering/OrderListStore`, `ticketing/*Export*`, `catalog/SeatImport` | Cái gì còn nhanh khi có 10 triệu đơn, và cách đo |
 
 ### Vừa đọc vừa chạy
 
@@ -1615,9 +1620,236 @@ lệnh nhắm cùng một dòng nên chạy lần lượt, bên đến sau thấ
 
 ---
 
-## 12. Test
+## 12. M4: dữ liệu lớn
 
-### 12.1. Hai loại test
+M3 kết thúc với một hệ thống **đúng**. M4 hỏi một câu khác: hệ thống đã chạy 2 năm, có 2 triệu tài khoản, 10 triệu
+đơn, 30 triệu lượt quét, thì cái gì còn nhanh? Lộ trình đặt 4 tiêu chí, mỗi tiêu chí là một test trong `acceptance`:
+
+| Tiêu chí | Test | Kỹ thuật chính | Mục |
+|---|---|---|---|
+| Báo cáo một sự kiện 200.000 đơn dưới 1 giây | `SalesReportPerformanceIT` | Bảng tổng hợp + hàng đợi | 12.3 |
+| Trang thứ 10.000 của danh sách vẫn nhanh | `OrderPagingIT` | Phân trang keyset | 12.4 |
+| Xuất 500.000 dòng với heap 256MB | `ExportMemoryIT` | Đọc theo lô / theo luồng, ghi thẳng ra response | 12.5 |
+| Import 50.000 ghế, báo đúng dòng lỗi | `SeatImportIT` | Kiểm tra hết rồi mới ghi, JDBC batch | 12.6 |
+
+Thêm hai việc không có test riêng mà có lý do riêng: công cụ sinh dữ liệu (12.1) và partition bảng log (12.7).
+
+Muốn tự thấy mọi con số trong chương này: `../infra/scripts/datagen.sh` (khoảng 10 phút), rồi
+`docker exec -it ticket2h-postgres-1 psql -U core` và chạy các câu `EXPLAIN` ở mục 12.2.
+
+### 12.1. Sinh dữ liệu giả cho đúng (`dev/datagen/`)
+
+Với 100 dòng, câu SQL nào cũng chạy trong 1 ms, nên không đo được gì. Công cụ sinh dữ liệu là bước đầu tiên của M4,
+và có ba cái khó:
+
+1. **Hai database.** Tài khoản ở identity, đơn ở core, và service không được đọc database của nhau. Cách giải: mỗi
+   service sinh phần của mình, hai bên tính id theo cùng công thức (`DatagenIds`): khách thứ i luôn là
+   `0d000000-0000-4000-8000-{i viết hex 12 chữ số}`. Đơn core sinh trỏ đúng tài khoản identity đã sinh, không bên nào
+   gọi bên nào. Công thức là hợp đồng (`infra/docs/contracts.md` mục 6), có test ở cả hai repo.
+2. **Nhanh.** 100 triệu dòng mà INSERT từng câu thì mất nhiều giờ. `CopyWriter` dùng `COPY ... FROM STDIN` của
+   PostgreSQL: gửi một luồng CSV, database ghi thẳng vào bảng, không phân tích từng câu lệnh. Đây là API riêng của
+   driver (`PGConnection.getCopyAPI()`), nên `pom.xml` đổi driver từ phạm vi `runtime` sang `compile`.
+3. **Khoá ngoại và bộ nhớ.** `order_items` trỏ tới `orders`, `tickets` trỏ tới `order_items` và `seats`... nên phải ghi
+   theo thứ tự. Nhưng giữ 200.000 đơn của sự kiện lớn trong bộ nhớ để ghi nhiều bảng thì tốn. Mẹo:
+   `EventPlan.order(k)` tính đơn thứ k **chỉ từ (seed, sự kiện, k)**, nên hỏi lại bao nhiêu lần cũng ra cùng kết quả.
+   `CoreDataGenerator.writeEvent` đi qua danh sách đơn nhiều lượt, mỗi lượt ghi một bảng:
+
+```java
+long rows = writeCatalog(c, plan) + writeOrders(c, plan) + writeSeats(c, plan) + writeItems(c, plan)
+        + writePayments(c, plan) + writeTickets(c, plan) + writeStaff(c, plan)
+        + writeCheckins(c, plan, extraRate);
+c.commit();   // một sự kiện, một transaction
+```
+
+Một bài học lúc làm công cụ này: thử cho id đơn **hoàn toàn ngẫu nhiên** (như `UUID.randomUUID()`), sinh dữ liệu chậm
+đi khoảng 4 lần. Index B-tree của khoá chính được sắp theo id; id ngẫu nhiên thì mỗi INSERT rơi vào một trang ngẫu
+nhiên của index, mà index của bảng 10 triệu dòng không nằm vừa bộ nhớ đệm, nên gần như lần nào cũng phải đọc trang từ
+đĩa. Id tăng dần thì mọi INSERT ghi vào cuối index. Đây là lý do UUID version 7 (48 bit đầu là thời gian) ra đời. Xem
+chú thích của `DatagenIds.of` để biết cách công cụ dung hoà.
+
+Dữ liệu sinh không đi qua nghiệp vụ (không gọi `GaInventory.take`, không giữ hạn mức), nên những bảng **suy ra được**
+từ bảng gốc (tồn kho GA còn lại, bảng tổng hợp doanh thu, hạn mức mua) được tính từ kế hoạch hoặc bằng SQL sau cùng.
+`CoreDataGeneratorIT` chạy lại bộ bất biến của M2 (`Invariants`) trên dữ liệu sinh: nếu công cụ sinh ra một ghế thuộc
+hai vé, test đỏ.
+
+### 12.2. `EXPLAIN ANALYZE`: hỏi PostgreSQL nó đã làm gì
+
+Trước khi tối ưu, phải đo. `EXPLAIN (ANALYZE, BUFFERS)` chạy câu lệnh thật và in kế hoạch kèm số liệu thật:
+
+```
+Limit  (actual time=0.079..0.083 rows=21 loops=1)
+  ->  Index Scan using idx_users_created on users  (actual time=0.078..0.081 rows=21 loops=1)
+        Index Cond: (ROW(created_at, id) < ROW('2025-...', '0d00...'))
+```
+
+Đọc từ trong ra ngoài (dòng thụt vào nhiều nhất chạy trước). Ba thứ cần nhìn:
+
+| Thấy | Nghĩa |
+|---|---|
+| `Seq Scan` | Đọc cả bảng. Với bảng 10 triệu dòng mà chỉ cần vài nghìn dòng: thiếu index phù hợp |
+| `Index Scan` / `Index Only Scan` | Đi theo index. `Index Cond` là điều kiện dùng để nhảy vào index; `Filter` là điều kiện lọc sau khi đã đọc dòng |
+| `actual ... rows=` | Số dòng nút đó thật sự trả ra. Trả 21 dòng mà nút con đọc 200.000 dòng: đang phí công |
+
+Các ADR-016…019 có số đo thật trên dữ liệu sinh. Hai ví dụ dễ thấy nhất: báo cáo doanh thu tính thẳng khi chưa có
+index nào bắt đầu bằng `event_id` (trước M4) là `Seq Scan` trên 10 triệu đơn; trang thứ 10.000 bằng OFFSET có một nút
+đọc 200.000 dòng để trả 20.
+
+### 12.3. Báo cáo dưới 1 giây: bảng tổng hợp và hàng đợi (`reporting/`, ADR-016)
+
+Cách tự nhiên nhất là tính mỗi lần xem:
+
+```sql
+SELECT (o.paid_at AT TIME ZONE e.time_zone)::date, sum(oi.quantity), sum(oi.quantity * oi.unit_price)
+FROM orders o JOIN events e ON e.id = o.event_id JOIN order_items oi ON oi.order_id = o.id
+WHERE o.event_id = :eventId AND o.status IN ('PAID', 'FULFILLED')
+GROUP BY 1
+```
+
+Đúng, nhưng thời gian tăng theo số đơn của sự kiện. Cách của M4: **tính trước**. Bảng `sales_daily_items` giữ sẵn tổng
+vé và doanh thu theo (sự kiện, ngày, kênh, loại vé): sự kiện 200.000 đơn chỉ còn vài chục dòng, báo cáo chỉ cộng vài
+chục dòng đó.
+
+Câu hỏi khó là **cập nhật bảng tổng hợp lúc nào**. Cộng ngay lúc webhook báo trả tiền? Mọi đơn của cùng sự kiện, cùng
+ngày, cùng kênh rơi vào **cùng một dòng** tổng hợp: lúc mở bán, mọi webhook xếp hàng chờ khoá dòng đó, đúng điểm nghẽn
+của bộ đếm GA (mục 8.4, ADR-003), mà lại nằm ngay trên đường thanh toán. Nên M4 tách làm hai:
+
+```
+webhook (PaymentWebhookProcessor), MỘT transaction:
+    order.markPaid(now)
+    outbox.write(... OrderPaid ...)
+    salesRollup.enqueue(orderId)      → INSERT vào sales_rollup_queue (mỗi đơn một dòng, không ai tranh)
+
+job mỗi 5 giây (SalesRollup.applyPending), MỘT câu lệnh:
+    lấy và XOÁ 500 đơn khỏi hàng đợi    (DELETE ... RETURNING, FOR UPDATE SKIP LOCKED)
+    cộng vé/doanh thu theo loại vé       (INSERT ... ON CONFLICT DO UPDATE SET tickets = tickets + EXCLUDED.tickets)
+    cộng số đơn theo ngày, kênh          (INSERT ... ON CONFLICT DO UPDATE)
+```
+
+Mở `SalesRollupStore.APPLY_BATCH` để xem câu lệnh thật. Vì sao **một** câu lệnh? Câu lệnh là nguyên tử: hoặc xoá khỏi
+hàng đợi và cộng cùng xảy ra, hoặc không gì cả. Không bao giờ có trạng thái "đã cộng mà chưa xoá" (cộng hai lần) hay
+"đã xoá mà chưa cộng" (mất đơn). Và đơn vào hàng đợi trong cùng transaction với lúc chuyển PAID, giống outbox ở mục
+11.2: trả tiền commit thì hàng đợi có đơn, rollback thì không. Đánh đổi: báo cáo chậm hơn thực tế tối đa 5 giây.
+
+Hai chi tiết nhỏ nhưng là câu hỏi phỏng vấn:
+
+- **Bẫy múi giờ.** `sale_date = (paid_at AT TIME ZONE e.time_zone)::date`. Server chạy giờ UTC; đơn trả tiền lúc
+  23:30 giờ Việt Nam là 16:30 UTC cùng ngày, nhưng đơn lúc 00:30 giờ Việt Nam là 17:30 UTC **ngày hôm trước**. Test
+  `sale_day_follows_the_event_time_zone_not_utc`.
+- **Cho người dùng chọn cột sắp xếp mà không bị SQL injection.** `ORDER BY` không dùng tham số `?` được (tham số chỉ
+  thay giá trị, không thay tên cột), nên dễ bị ghép chuỗi. Cách làm: nhận `sort` là enum `SalesSort`
+  (Spring trả 400 với giá trị lạ), rồi `SalesReportStore.orderBy` dịch từng giá trị enum sang một đoạn SQL viết sẵn.
+  Chuỗi người dùng gửi lên không bao giờ chạm tới câu SQL. Test `unknown_sort_values_are_rejected_instead_of_reaching_sql`
+  gửi `sort=revenue; DROP TABLE orders`.
+
+### 12.4. Phân trang keyset (`ordering/OrderListStore`, identity `UserSearchImpl`, ADR-018)
+
+`LIMIT 20 OFFSET 199980` nghĩa là "đọc 200.000 dòng, bỏ 199.980 dòng đầu, trả 20 dòng". Trang càng sâu càng chậm. Và
+khi có dòng mới chen vào đầu danh sách giữa hai lần bấm "trang sau", mọi dòng bị đẩy xuống: trang sau lặp lại dòng
+cuối của trang trước.
+
+Keyset hỏi theo kiểu khác: "cho tôi 20 dòng **đứng sau dòng cuối tôi vừa thấy**":
+
+```sql
+SELECT ... FROM orders
+WHERE event_id = :eventId AND (created_at, id) < (:afterAt, :afterId)   -- dòng cuối trang trước
+ORDER BY created_at DESC, id DESC
+LIMIT 21                                                                 -- thừa 1 để biết còn trang sau
+```
+
+Với index `(event_id, created_at DESC, id DESC)`, `(created_at, id) < (...)` là phép so sánh **cả hàng** (row value):
+PostgreSQL dùng nó làm `Index Cond`, nhảy thẳng tới đúng chỗ trong index rồi đọc 21 dòng. Trang 1 hay trang 10.000 đều
+đọc 21 dòng. Ba chi tiết:
+
+- `id` đứng cuối thứ tự để thứ tự là **duy nhất**: nhiều đơn cùng `created_at` (cùng micro giây) mà chỉ so
+  `created_at` thì sẽ lặp hoặc sót đúng các đơn đó. Test `walking_next_cursors_visits_every_order_once_even_with_identical_timestamps`.
+- Client không cần biết bên trong: server gửi `nextCursor` là chuỗi base64 của `created_at|id` (`KeysetCursor`),
+  client gửi lại nguyên văn.
+- Không có tổng số trang: `count(*)` trên 2 triệu dòng ở mỗi trang tốn hơn chính việc lấy trang. Web đổi thanh số trang
+  thành nút "Xem thêm".
+
+Kiểm chứng không cần đồng hồ: `OrderPagingIT` đọc `EXPLAIN (ANALYZE, FORMAT JSON)` và đếm số dòng các nút quét đã đọc:
+keyset 21 dòng, OFFSET hơn 200.000 dòng. Test kiểu này không bị "máy CI chậm hôm nay" làm đỏ oan.
+
+### 12.5. Xuất 500.000 dòng với 256MB heap (`ticketing/AttendeeExport`, `CheckinLogExport`, ADR-017)
+
+Cách sai: đọc hết vào `List<Row>` rồi ghi. 500.000 dòng × vài trăm byte là hàng trăm MB. Cách đúng: **không bao giờ
+giữ nhiều hơn một ít dòng trong bộ nhớ**, đọc tới đâu ghi ra response tới đó. Có hai cách đọc như vậy, và repo dùng cả
+hai, có chủ ý:
+
+| | Danh sách khách (`AttendeeExport`) | Lịch sử soát vé (`CheckinLogExport`) |
+|---|---|---|
+| Cần gọi service khác giữa chừng? | Có: tên, email ở identity | Không: tên nhân viên hỏi một lần trước |
+| Cách đọc | Theo **lô keyset**: mỗi lô 1.000 vé là một câu SELECT tự commit | Theo **luồng**: một transaction chỉ đọc, `fetchSize = 1000` |
+| Vì sao | Quy ước "không gọi HTTP trong transaction" (mục 10.2) | Đơn giản hơn, một câu SQL |
+
+Chi tiết về "đọc theo luồng" mà nhiều người không biết: driver PostgreSQL **chỉ** đọc theo cursor (mỗi lần 1.000 dòng)
+khi autocommit tắt, tức là phải nằm trong transaction. Ngoài transaction, `setFetchSize` bị bỏ qua và driver tải hết kết
+quả vào bộ nhớ trước khi trả dòng đầu. Vì vậy `CheckinLogReader.read` có `@Transactional(readOnly = true)`, tách bean
+riêng để annotation có hiệu lực (mục 2.8).
+
+Ghi ra đâu? Thẳng vào `response.getOutputStream()` trong luồng xử lý request (`OrganizerExportController`). Header chỉ
+được đặt sau khi đã kiểm tra quyền và đọc xong lô đầu: lỗi trước đó (403, identity sập → 502) vẫn trả JSON như mọi API.
+Lỗi sau khi đã ghi dòng đầu thì không đổi được mã HTTP nữa, nên ghi một dòng `# LỖI ...` ở cuối file.
+
+Một lỗ hổng bảo mật ít người nghĩ tới: **CSV injection**. Khách đặt tên `=HYPERLINK("http://...")`, ban tổ chức mở file
+bằng Excel, Excel chạy công thức. `CsvWriter` thêm `'` trước mọi ô bắt đầu bằng `= + - @`.
+
+Test chứng minh 256MB thế nào? `pom.xml` có execution `export-memory` của failsafe: chạy riêng `ExportMemoryIT` trong một
+JVM `-Xmx256m`. App và test cùng nằm trong 256MB đó. Thử sửa `AttendeeExport` gom mọi dòng vào một `List` rồi mới ghi:
+test hết heap và đỏ.
+
+### 12.6. Nhập 50.000 ghế từ file (`catalog/SeatImport`, ADR-020)
+
+Hai quyết định:
+
+- **Tất cả hoặc không gì cả.** File có lỗi thì không thêm ghế nào, và báo **mọi** dòng lỗi một lần (dòng 1 là tiêu đề,
+  đúng số dòng người dùng thấy trong Excel). Nếu ghi phần đúng, bỏ phần sai, thì sửa file rồi tải lại sẽ gặp lỗi "trùng"
+  ở mọi dòng đã ghi lần trước.
+- **Hai bước.** Bước 1 không cần database: đọc file (`CsvReader`), kiểm tra từng dòng một mình. Bước 2 trong một
+  transaction (`OrganizerCatalogService.importSeats`): khoá sự kiện, kiểm tra những gì cần database (loại vé có thật,
+  ghế đã có, trùng dòng nào trong file), rồi INSERT.
+
+INSERT 50.000 dòng từng câu một là 50.000 lượt đi về giữa app và database. `CatalogStore.insertSeats` dùng
+`batchUpdate` (JDBC batch, mỗi lần 1.000 dòng), cộng với `reWriteBatchedInserts=true` trong `application.yml`: driver gộp
+một lô thành vài câu `INSERT ... VALUES (...), (...), ...`. Câu hỏi trong lộ trình: vì sao `GenerationType.IDENTITY` làm
+Hibernate không batch INSERT được? Vì với IDENTITY, database mới cấp id lúc INSERT, mà Hibernate cần biết id ngay khi
+`persist` để quản lý entity, nên phải chạy từng câu INSERT và đọc id về. Bảng nghiệp vụ ở đây dùng UUID sinh ở Java
+(`AssignedIdEntity`), nên không gặp chuyện đó.
+
+### 12.7. Chia bảng log theo tháng (`V117`, `ticketing/CheckinLogPartitions`, ADR-019)
+
+`checkin_logs` chỉ thêm, không sửa, và gần như luôn được đọc theo khoảng thời gian. Sau 2 năm, 30 triệu dòng. Partition
+theo `scanned_at`: mỗi tháng một bảng con (`checkin_logs_2026_11`...). Truy vấn có điều kiện thời gian chỉ đọc bảng con
+liên quan (**partition pruning**: thấy trong `EXPLAIN`, chỉ có tên một bảng con). Bỏ dữ liệu cũ là `DROP` một bảng con
+thay vì `DELETE` hàng triệu dòng.
+
+Ba điều phải nhớ khi làm partition:
+
+1. Khoá chính phải chứa cột dùng để chia: `PRIMARY KEY (id, scanned_at)`.
+2. Bảng con cho tháng sắp tới phải có trước khi tới tháng đó: job `CheckinLogPartitions` mỗi ngày giữ sẵn 3 tháng.
+3. Bảng `checkin_logs_default` hứng mọi dòng không thuộc tháng nào, để check-in ở cổng không bao giờ lỗi chỉ vì thiếu
+   bảng con. Đọc phần "Hệ quả" của ADR-019 để biết cái giá của nó.
+
+Đọc `V117__m4_checkin_logs_partition.sql`: chuyển một bảng đang có dữ liệu sang bảng partition là đổi tên bảng cũ, tạo
+bảng mới, chép dữ liệu, chỉnh lại sequence, xoá bảng cũ, tất cả trong một transaction của Flyway.
+
+### 12.8. Tóm tắt
+
+| Vấn đề | Đừng | Làm |
+|---|---|---|
+| Báo cáo trên bảng rất lớn | Tính lại mỗi lần xem; cộng thẳng vào dòng tổng hợp trong transaction nóng | Bảng tổng hợp, cập nhật qua hàng đợi ghi cùng transaction |
+| Người dùng chọn cột sắp xếp | Ghép chuỗi vào `ORDER BY` | Enum → đoạn SQL viết sẵn |
+| Danh sách sâu | `OFFSET`, `count(*)` mỗi trang | Keyset `(thời gian, id) < (...)` + index đúng thứ tự |
+| Xuất file lớn | Gom vào `List`/chuỗi | Đọc theo lô keyset (cần gọi mạng) hoặc theo luồng với fetch size trong transaction (không cần) |
+| Nhập file lớn | Ghi từng dòng, bỏ dòng lỗi | Kiểm tra hết, báo mọi dòng lỗi, ghi theo lô trong một transaction |
+| Bảng log chỉ thêm | Một bảng khổng lồ, `DELETE` dữ liệu cũ | Partition theo thời gian, bảng default làm lưới an toàn |
+| Đo hiệu năng | Đoán | Dữ liệu cỡ thật + `EXPLAIN ANALYZE`; test đếm dòng đã đọc thay vì đo giờ |
+
+---
+
+## 13. Test
+
+### 13.1. Hai loại test
 
 | | Unit test (`*Test`) | Integration test (`*IT`) |
 |---|---|---|
@@ -1626,7 +1858,7 @@ lệnh nhắm cùng một dòng nên chạy lần lượt, bên đến sau thấ
 | Ví dụ | `QrTokenCodecTest`, `OrderStatusTest`, `VietnameseTextTest` | `SeatClaimConcurrencyIT`, `PaymentWebhookIT` |
 | Lệnh | `./mvnw test` | `./mvnw verify` |
 
-### 12.2. JUnit 5 và AssertJ
+### 13.2. JUnit 5 và AssertJ
 
 ```java
 class RequestHashTest {
@@ -1645,7 +1877,7 @@ class RequestHashTest {
 - `assertThatThrownBy(() -> ...).isInstanceOf(SoldOutException.class)` kiểm tra code ném đúng exception.
 - Tên test viết như một câu mô tả hành vi: đọc danh sách tên test là biết hệ thống làm gì.
 
-### 12.3. Hạ tầng test (`src/test/java/com/ticket2h/support/`)
+### 13.3. Hạ tầng test (`src/test/java/com/ticket2h/support/`)
 
 | Class | Vai trò |
 |---|---|
@@ -1653,6 +1885,7 @@ class RequestHashTest {
 | `IntegrationTest` | Lớp cha mọi `*IT`: khởi động app ở cổng ngẫu nhiên, **xoá sạch bảng trước mỗi test** |
 | `MutableClock` | Đồng hồ "tua" được: `clock.advance(Duration.ofMinutes(12))` |
 | `TestData` | Tạo nhanh dữ liệu bằng SQL: `user()`, `eventOnSale(...)`, `seats(...)`, `paidOrderViaWebhook(...)` |
+| `BulkData` | (M4) Hàng trăm nghìn đơn, vé, lượt quét sinh ngay trong PostgreSQL bằng `generate_series`, không qua bộ nhớ JVM |
 | `Concurrency` | Chạy N việc trên M luồng, cố cho chúng bắt đầu cùng lúc |
 | `FakeGateway` | Cổng thanh toán giả bằng HTTP server có sẵn của JDK; lập trình được để trả 500, chậm, 503 |
 | `KafkaTestMessages` | Gửi tay và đọc message Kafka trong test (kiểm tra DLT, hợp đồng event) |
@@ -1669,7 +1902,7 @@ hợp đồng với notification-service ([infra/docs/contracts.md](https://gith
 dữ liệu sau mỗi test. Nhưng khi đó mọi thao tác chạy trong transaction của luồng test, các luồng khác **không thấy**
 dữ liệu chưa commit, và test đồng thời trở nên vô nghĩa. Nên ở đây dữ liệu được dọn bằng `TRUNCATE` trước mỗi test.
 
-### 12.4. Đọc một test đồng thời
+### 13.4. Đọc một test đồng thời
 
 `acceptance/SeatClaimConcurrencyIT.java`:
 
@@ -1706,7 +1939,7 @@ void only_one_of_200_concurrent_buyers_gets_the_same_seat() throws Exception {
 `Concurrency.run` dùng hai `CountDownLatch`: `ready` chờ đủ luồng sẵn sàng, `start` thả tất cả cùng lúc. Không có
 nó, luồng đầu tiên có thể chạy xong trước khi luồng cuối kịp khởi động, và test không còn "đồng thời".
 
-### 12.5. Test việc chạy bất đồng bộ
+### 13.5. Test việc chạy bất đồng bộ
 
 Phát vé đi qua Kafka nên không xảy ra ngay. Dùng **Awaitility** để chờ có giới hạn:
 
@@ -1718,13 +1951,13 @@ await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
 Không dùng `Thread.sleep(10000)`: chờ cố định thì vừa chậm (luôn chờ đủ 10 giây) vừa dễ đỏ (máy chậm hơn thì 10
 giây không đủ).
 
-### 12.6. Package `acceptance`
+### 13.6. Package `acceptance`
 
-Các test quan trọng nhất (đồng thời, webhook, QR, check-in, chuyển nhượng, app sập) nằm trong
-`src/test/java/com/ticket2h/acceptance/`. Quy tắc trong `CLAUDE.md`: **test đỏ thì sửa code, không sửa test**.
+Các test quan trọng nhất (đồng thời, webhook, QR, check-in, chuyển nhượng, app sập, và bốn tiêu chí M4 ở mục 12) nằm
+trong `src/test/java/com/ticket2h/acceptance/`. Quy tắc trong `CLAUDE.md`: **test đỏ thì sửa code, không sửa test**.
 Một agent AI (hoặc chính bạn khi vội) rất dễ "sửa" test cho xanh thay vì sửa lỗi thật.
 
-### 12.7. Chạy và debug test trong IntelliJ
+### 13.7. Chạy và debug test trong IntelliJ
 
 - Bấm ▶ cạnh tên class hoặc tên method test.
 - Đặt breakpoint trong code app (ví dụ trong `SeatHoldService.hold`), bấm 🐞 cạnh test: app dừng đúng chỗ đó
@@ -1733,7 +1966,7 @@ Một agent AI (hoặc chính bạn khi vội) rất dễ "sửa" test cho xanh 
 
 ---
 
-## 13. Bài tập thực hành và câu hỏi tự kiểm tra
+## 14. Bài tập thực hành và câu hỏi tự kiểm tra
 
 **Trước khi làm bài tập cấp 2 trở lên:** commit code hiện tại (`git add . && git commit -m "M1-M3"`) để luôn quay lại
 được bằng `git restore <file>` hoặc `git stash`.
@@ -1760,9 +1993,10 @@ Một agent AI (hoặc chính bạn khi vội) rất dễ "sửa" test cho xanh 
 7. **Thêm cột mới đúng cách.** Thêm số điện thoại cho tài khoản: tạo `V113__users_phone.sql`
    (`ALTER TABLE users ADD COLUMN phone varchar(20);`), thêm trường vào `User`, `RegisterRequest`, `UserResponse`,
    có validation `@Pattern`. Vì sao **không** được sửa `V1__m1_identity.sql`?
-8. **Endpoint thống kê cho BTC.** Viết `GET /organizer/events/{id}/sales` trả số vé đã bán theo từng loại vé
-   (SQL `GROUP BY` trên `order_items` + `orders` trạng thái `PAID`/`FULFILLED`). Nhớ kiểm tra BTC sở hữu sự kiện
-   (dùng lại `requireOwner`). Viết một test trong `OrganizerCatalogApiIT`.
+8. **Thêm cách gom báo cáo theo tuần.** Đọc `reporting/SalesReportStore`. Thêm `WEEK` vào `SalesGroupBy` (tuần bắt đầu
+   thứ Hai: `date_trunc('week', sale_date)::date`), thêm nhánh SQL tương ứng, không đổi bảng tổng hợp. Viết một test
+   trong `SalesReportApiIT`: hai đơn trả tiền thứ Hai và Chủ nhật cùng tuần ra một dòng. Vì sao không cần sửa job cộng
+   dồn?
 
 ### Cấp 3: tự tạo lỗi, xem test bắt được
 
@@ -1786,11 +2020,20 @@ Mỗi bài: sửa, chạy test, quan sát, rồi **hoàn tác**.
     Có test nào đỏ không? Nếu không, vì sao dòng đó vẫn đáng giữ? (Gợi ý: phòng thủ nhiều lớp.)
 14. Đổi `MessageDigest.isEqual` thành `Arrays.equals` trong `WebhookSignatureVerifier`. Test vẫn xanh. Đây là loại
     lỗi nào mà test chức năng không bắt được?
+14a. (M4) Trong `AttendeeExport.export`, gom mọi dòng vào một `List<String>` rồi mới ghi ra `csv`. Chạy riêng
+    execution 256MB: `./mvnw test-compile failsafe:integration-test@export-memory failsafe:verify@export-memory`.
+    Lỗi gì? Thử tiếp: bỏ `@Transactional(readOnly = true)` trên `CheckinLogReader.read`.
+    Test lịch sử soát vé còn xanh không, vì sao? (Gợi ý: fetch size và autocommit, mục 12.5.)
+14b. (M4) Xoá `id DESC` khỏi `ORDER BY` và khỏi điều kiện keyset trong `OrderListStore.page` (chỉ còn `created_at`).
+    Test nào đỏ? (Gợi ý: đơn tạo cùng micro giây.)
 
 ### Cấp 4: tự viết tính năng
 
 15. **BTC huỷ vé.** `POST /organizer/tickets/{id}/void` chuyển vé `VALID` → `VOID` bằng một câu UPDATE có điều kiện;
     vé của sự kiện BTC khác → 403. Viết test: quét QR của vé đã huỷ phải trả `VOIDED`.
+16a. **(M4) Hoàn tiền sau khi đã PAID.** Giả sử ban tổ chức huỷ sự kiện và hoàn tiền mọi đơn. Báo cáo doanh thu phải
+    trừ đi. Thiết kế lại hàng đợi `sales_rollup_queue` (gợi ý: thêm dấu +/−, hoặc một bảng hàng đợi riêng) sao cho mỗi
+    lần hoàn vẫn được trừ đúng một lần. Viết ADR ngắn trước khi code.
 16. **Giới hạn chuyển nhượng.** Mỗi vé chỉ chuyển được một lần (ADR-004 nói hạn mức có thể bị lách qua chuyển
     nhượng). Làm trong **một** câu UPDATE, không đọc rồi kiểm tra. Viết test 2 luồng cùng chuyển một vé.
 
@@ -1831,7 +2074,7 @@ Trả lời không nhìn code. Nhiều câu là câu phỏng vấn backend phổ
 
 ---
 
-## 14. Thuật ngữ
+## 15. Thuật ngữ
 
 | Thuật ngữ | Nghĩa ngắn gọn |
 |---|---|
@@ -1872,3 +2115,14 @@ Trả lời không nhìn code. Nhiều câu là câu phỏng vấn backend phổ
 | Backoff | Thử lại với thời gian chờ tăng dần |
 | Testcontainers | Thư viện bật container Docker (Postgres, Kafka) trong test |
 | Given / When / Then | Cấu trúc test: chuẩn bị, hành động, kiểm tra |
+| `EXPLAIN ANALYZE` | Chạy câu SQL và in kế hoạch thực thi kèm thời gian, số dòng thật của từng bước |
+| Seq Scan / Index Scan | Đọc cả bảng / đi theo index |
+| Bảng tổng hợp (rollup) | Bảng giữ sẵn kết quả `SUM`/`COUNT` đã gom, cập nhật dần thay vì tính lại mỗi lần |
+| Materialized view | View lưu sẵn kết quả, phải `REFRESH` để cập nhật |
+| Keyset pagination | Phân trang bằng "đứng sau dòng cuối đã thấy" thay vì `OFFSET` |
+| Cursor (phân trang) | Chuỗi mờ đánh dấu vị trí trong danh sách, client gửi lại để lấy trang sau |
+| Fetch size | Số dòng driver lấy về mỗi lần khi đọc theo luồng (PostgreSQL: chỉ khi autocommit tắt) |
+| `COPY` | Lệnh nạp dữ liệu hàng loạt của PostgreSQL, nhanh hơn INSERT nhiều lần |
+| JDBC batch | Gửi nhiều câu lệnh cùng loại trong một lượt đi về database |
+| Partition / partition pruning | Chia một bảng thành nhiều bảng con / database bỏ qua bảng con không liên quan |
+| CSV injection | Ô CSV bắt đầu bằng `=`, `+`, `-`, `@` bị Excel chạy như công thức |

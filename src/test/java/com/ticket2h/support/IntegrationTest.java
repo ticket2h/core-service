@@ -24,7 +24,7 @@ import tools.jackson.databind.json.JsonMapper;
  * đồng thời vô nghĩa. Vì vậy dọn dữ liệu bằng TRUNCATE trước mỗi test.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import({TestcontainersConfig.class, TestData.class})
+@Import({TestcontainersConfig.class, TestData.class, BulkData.class})
 @ActiveProfiles("test")
 public abstract class IntegrationTest {
 
@@ -32,6 +32,7 @@ public abstract class IntegrationTest {
 
     private static final String TRUNCATE = """
             TRUNCATE checkin_logs, ticket_transfers, tickets, outbox_events,
+                     sales_rollup_queue, sales_daily_items, sales_daily_orders,
                      payment_webhook_logs, payments, order_items, purchase_quotas, orders, event_staff,
                      seats, ticket_types, events, venues
             RESTART IDENTITY CASCADE
@@ -43,6 +44,7 @@ public abstract class IntegrationTest {
     @Autowired protected JdbcTemplate jdbc;
     @Autowired protected MutableClock clock;
     @Autowired protected TestData testData;
+    @Autowired protected BulkData bulkData;
     @Autowired protected JsonMapper json;
     @Autowired private KafkaListenerEndpointRegistry kafkaListeners;
 

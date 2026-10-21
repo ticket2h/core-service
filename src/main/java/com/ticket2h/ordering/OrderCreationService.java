@@ -65,8 +65,8 @@ public class OrderCreationService {
 
         // INSERT đơn là thao tác GHI ĐẦU TIÊN, và phải flush ngay. Request song song cùng key sẽ
         // chờ ở đây cho tới khi request đầu commit (→ unique violation → replay) hoặc rollback.
-        Order order = Order.pending(userId, event.id(), idempotencyKey, requestHash, priced.total(), now,
-                now.plus(properties.order().holdDuration()));
+        Order order = Order.pending(userId, event.id(), request.salesChannel(), idempotencyKey, requestHash,
+                priced.total(), now, now.plus(properties.order().holdDuration()));
         orders.saveAndFlush(order);
 
         // Thứ tự khoá (B3): purchase_quotas → ticket_types theo id → seats theo id

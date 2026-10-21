@@ -63,6 +63,12 @@ public class Api {
                 .headers(h -> headers.forEach(h::set)).body(body));
     }
 
+    /** Body thô với Content-Type tuỳ ý (file CSV), kèm token. */
+    public Response postBytes(String path, String token, byte[] body, String contentType) {
+        return exchange(rest.post().uri(path).contentType(MediaType.parseMediaType(contentType))
+                .headers(h -> auth(h, token)).body(body));
+    }
+
     public ResponseEntity<byte[]> getBytes(String path, String token) {
         return rest.get().uri(path).headers(h -> auth(h, token)).retrieve().toEntity(byte[].class);
     }

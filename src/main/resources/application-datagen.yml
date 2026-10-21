@@ -1,0 +1,15 @@
+# Công cụ sinh dữ liệu lớn (M4): ./mvnw spring-boot:run -Dspring-boot.run.profiles=datagen
+# Cỡ dữ liệu: ticket2h.datagen.* (DatagenProperties), ví dụ -Dspring-boot.run.arguments=--ticket2h.datagen.orders=1000000
+# Cả hệ thống: infra/scripts/datagen.sh (sinh tài khoản ở identity-service trước, cùng các con số).
+spring:
+  main:
+    web-application-type: none     # không mở cổng 8080, chạy xong thì tắt
+  kafka:
+    listener:
+      auto-startup: false          # không nhận message
+ticket2h:
+  jobs:
+    enabled: false
+  outbox:
+    relay:
+      enabled: false

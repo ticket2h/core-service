@@ -14,6 +14,9 @@ Nguồn sự thật là các file Flyway trong `src/main/resources/db/migration`
 | `V112__m3_outbox_notifications.sql` | `outbox_events`, `notification_deliveries` |
 | `V113__notification_moved_out.sql` | Xoá `notification_deliveries` (chuyển sang notification-service, ADR-011 ở [infra/docs/adr](https://github.com/ticket2h/infra/tree/main/docs/adr)) |
 | `V114__identity_moved_out.sql` | Bỏ 10 khoá ngoại tới `users`/`organizers`, xoá hai bảng đó (chuyển sang identity-service, ADR-013) |
+| `V115__m4_sales_report.sql` | `orders.sales_channel`; hàng đợi `sales_rollup_queue`; bảng tổng hợp `sales_daily_items`, `sales_daily_orders` (ADR-016) |
+| `V116__m4_list_export_indexes.sql` | Index `orders (event_id, created_at DESC, id DESC)` cho danh sách đơn keyset (ADR-018), `tickets (event_id, issued_at, id)` cho file danh sách khách (ADR-017) |
+| `V117__m4_checkin_logs_partition.sql` | `checkin_logs` thành bảng partition theo tháng (`scanned_at`), khoá chính `(id, scanned_at)`, bảng `checkin_logs_default` hứng dòng ngoài các tháng đã tạo (ADR-019) |
 
 ## Ràng buộc là lớp chặn cuối cùng
 
@@ -29,6 +32,9 @@ Nguồn sự thật là các file Flyway trong `src/main/resources/db/migration`
 | Mỗi giao dịch của cổng chỉ ghi nhận một lần | `uq_payments_gateway_transaction`, `uq_payments_gateway_payment` |
 | Phát vé lặp lại không tạo thêm vé | `uq_tickets_order_item_seq` |
 | Một ghế tối đa một vé còn hiệu lực | `uq_tickets_active_seat` (partial, loại trừ `VOID`) |
+| Kênh bán là giá trị đã biết | `orders_sales_channel_check` |
+| Mỗi đơn chờ cộng vào báo cáo đúng một lần | `sales_rollup_queue` khoá chính `order_id` |
+| Số liệu tổng hợp không âm | `sales_daily_items_non_negative`, `sales_daily_orders_non_negative` |
 
 ## Bảng nào đổi bằng gì
 
@@ -38,3 +44,5 @@ Nguồn sự thật là các file Flyway trong `src/main/resources/db/migration`
 | `seats`, `ticket_types` (GA), `purchase_quotas`, `tickets` | SQL có điều kiện qua `NamedParameterJdbcTemplate`, kiểm tra số dòng |
 | `events`, `venues` | SQL (`CatalogStore`) |
 | `outbox_events`, `payment_webhook_logs`, `checkin_logs` | SQL |
+| `sales_rollup_queue`, `sales_daily_items`, `sales_daily_orders` | SQL (`SalesRollupStore`): ghi hàng đợi lúc đơn PAID, job lấy-xoá-cộng trong một câu lệnh |
+| bảng con `checkin_logs_YYYY_MM` | `CheckinLogPartitions` tạo trước 3 tháng, mỗi ngày một lần |

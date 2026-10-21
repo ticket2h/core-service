@@ -6,6 +6,7 @@ import java.util.List;
 
 import jakarta.servlet.http.HttpServletResponse;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
@@ -37,6 +38,7 @@ import com.ticket2h.common.error.ProblemDetails;
 import tools.jackson.databind.json.JsonMapper;
 
 @Configuration(proxyBeanMethods = false)
+@ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)   // công cụ sinh dữ liệu chạy không có web
 @EnableMethodSecurity
 public class SecurityConfig {
 

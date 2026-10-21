@@ -116,6 +116,35 @@ class TicketStore {
                 .addValue("toUserId", toUserId).addValue("version", newTokenVersion).addValue("now", Times.utc(now)));
     }
 
+    /**
+     * Một lô vé của sự kiện cho file danh sách khách, theo thứ tự phát vé, đi tiếp từ vé cuối của lô trước (keyset:
+     * {@code (issued_at, id) > (...)}, index {@code idx_tickets_event_issued}). Mỗi lô là một câu SELECT tự commit:
+     * giữa hai lô core còn gọi identity, không được giữ transaction trong lúc gọi mạng. Bỏ vé VOID.
+     */
+    List<AttendeeRow> attendeeBatch(UUID eventId, AttendeeRow after, int limit) {
+        MapSqlParameterSource params = new MapSqlParameterSource().addValue("eventId", eventId)
+                .addValue("limit", limit);
+        String afterCondition = "";
+        if (after != null) {
+            afterCondition = "AND (t.issued_at, t.id) > (:afterIssuedAt, :afterId)";
+            params.addValue("afterIssuedAt", Times.utc(after.issuedAt())).addValue("afterId", after.ticketId());
+        }
+        return jdbc.query("""
+                SELECT t.id, t.issued_at, t.status, t.owner_user_id, t.checked_in_at, t.checked_in_gate,
+                       tt.name AS ticket_type_name, s.section, s.row_label, s.seat_number
+                FROM tickets t
+                JOIN ticket_types tt ON tt.id = t.ticket_type_id
+                LEFT JOIN seats s ON s.id = t.seat_id
+                WHERE t.event_id = :eventId AND t.status <> 'VOID' %s
+                ORDER BY t.issued_at, t.id
+                LIMIT :limit
+                """.formatted(afterCondition), params, (rs, i) -> new AttendeeRow(
+                        rs.getObject("id", UUID.class), rs.getObject("issued_at", OffsetDateTime.class).toInstant(),
+                        TicketStatus.valueOf(rs.getString("status")), rs.getObject("owner_user_id", UUID.class),
+                        rs.getString("ticket_type_name"), seatLabel(rs),
+                        toInstant(rs.getObject("checked_in_at", OffsetDateTime.class)), rs.getString("checked_in_gate")));
+    }
+
     /** Ghi mọi lượt quét, kể cả thất bại. ticket_id/event_id rỗng khi QR không giải mã được. */
     void insertCheckinLog(UUID ticketId, UUID eventId, UUID staffId, String gate, CheckinResult result, Instant now) {
         jdbc.update("""
@@ -126,10 +155,18 @@ class TicketStore {
                 .addValue("gate", gate).addValue("result", result.name()).addValue("now", Times.utc(now)));
     }
 
-    private static TicketView view(ResultSet rs, int i) throws SQLException {
+    /** "VIP A-12"; vé GA (không có ghế) là null. */
+    private static String seatLabel(ResultSet rs) throws SQLException {
         String section = rs.getString("section");
-        String seatLabel = section == null ? null
-                : section + " " + rs.getString("row_label") + "-" + rs.getInt("seat_number");
+        return section == null ? null : section + " " + rs.getString("row_label") + "-" + rs.getInt("seat_number");
+    }
+
+    private static Instant toInstant(OffsetDateTime value) {
+        return value == null ? null : value.toInstant();
+    }
+
+    private static TicketView view(ResultSet rs, int i) throws SQLException {
+        String seatLabel = seatLabel(rs);
         return new TicketView(
                 rs.getObject("id", UUID.class), rs.getObject("order_id", UUID.class),
                 rs.getObject("event_id", UUID.class), rs.getObject("ticket_type_id", UUID.class),
@@ -147,4 +184,8 @@ class TicketStore {
 
     record NewTicket(UUID orderId, UUID orderItemId, int itemSeq, UUID eventId, UUID ticketTypeId, UUID seatId,
             UUID ownerUserId) {}
+
+    /** Một dòng của file danh sách khách. {@code seat} null với vé GA; {@code checkedInAt} null khi chưa vào cổng. */
+    record AttendeeRow(UUID ticketId, Instant issuedAt, TicketStatus status, UUID ownerUserId, String ticketType,
+            String seat, Instant checkedInAt, String gate) {}
 }

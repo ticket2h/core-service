@@ -29,6 +29,7 @@ public enum ErrorCode {
     TICKET_NOT_VALID(HttpStatus.CONFLICT, "Vé không còn hiệu lực"),
     PAYLOAD_TOO_LARGE(HttpStatus.CONTENT_TOO_LARGE, "Nội dung request quá lớn"),
     IDEMPOTENCY_KEY_REUSED(HttpStatus.UNPROCESSABLE_CONTENT, "Idempotency-Key đã dùng cho request khác"),
+    SEAT_IMPORT_INVALID(HttpStatus.UNPROCESSABLE_CONTENT, "File ghế có lỗi"),
     INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "Lỗi hệ thống"),
     PAYMENT_GATEWAY_UNAVAILABLE(HttpStatus.BAD_GATEWAY, "Cổng thanh toán không phản hồi"),
     IDENTITY_UNAVAILABLE(HttpStatus.BAD_GATEWAY, "Dịch vụ tài khoản không phản hồi");

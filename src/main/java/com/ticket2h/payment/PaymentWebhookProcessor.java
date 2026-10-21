@@ -18,6 +18,7 @@ import com.ticket2h.ordering.Order;
 import com.ticket2h.ordering.OrderService;
 import com.ticket2h.ordering.OrderStatus;
 import com.ticket2h.outbox.OutboxWriter;
+import com.ticket2h.reporting.SalesRollup;
 
 /**
  * Xử lý webhook đã qua kiểm tra chữ ký, trong MỘT transaction. Thứ tự khoá (B3): order → payment →
@@ -33,14 +34,16 @@ class PaymentWebhookProcessor {
     private final OrderService orders;
     private final SeatHoldService seatHolds;
     private final OutboxWriter outbox;
+    private final SalesRollup salesRollup;
     private final Clock clock;
 
     PaymentWebhookProcessor(PaymentRepository payments, OrderService orders, SeatHoldService seatHolds,
-            OutboxWriter outbox, Clock clock) {
+            OutboxWriter outbox, SalesRollup salesRollup, Clock clock) {
         this.payments = payments;
         this.orders = orders;
         this.seatHolds = seatHolds;
         this.outbox = outbox;
+        this.salesRollup = salesRollup;
         this.clock = clock;
     }
 
@@ -95,6 +98,7 @@ class PaymentWebhookProcessor {
                 order.markPaid(now);
                 outbox.write("Order", order.getId(), Topics.ORDER_PAID, Topics.ORDER_EVENTS,
                         new OrderPaid(order.getId(), order.getUserId(), order.getEventId(), now));
+                salesRollup.enqueue(order.getId(), now);   // báo cáo doanh thu (ADR-016), cùng transaction
                 return WebhookOutcome.PAID;
             }
             payment.requestRefund("SEATS_TAKEN", now);
