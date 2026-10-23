@@ -13,8 +13,8 @@ import com.ticket2h.common.time.Times;
 /**
  * SQL của hàng đợi {@code sales_rollup_queue} và hai bảng tổng hợp {@code sales_daily_items},
  * {@code sales_daily_orders} (ADR-016). Ngày bán tính theo múi giờ của sự kiện:
- * {@code (paid_at AT TIME ZONE e.time_zone)::date}. Đơn trả tiền lúc 23:30 giờ Việt Nam là ngày hôm đó, dù theo
- * giờ UTC của server đã sang ngày hôm sau.
+ * {@code (paid_at AT TIME ZONE e.time_zone)::date}. Đơn trả lúc 23:30 ngày 1/11 và 00:30 ngày 2/11 giờ Việt Nam
+ * (16:30 và 17:30 UTC, cùng ngày 1/11) là hai ngày bán khác nhau; gom theo ngày UTC thì hai đơn rơi vào cùng một ngày.
  */
 @Repository
 class SalesRollupStore {

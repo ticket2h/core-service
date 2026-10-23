@@ -80,3 +80,17 @@ Qua API (`GET /organizer/events/{id}/sales`, gồm JWT, JSON, HTTP): 6–22 ms c
 khởi động 94 ms). Tính thẳng chỉ vừa sát 1 giây trên một máy 20 nhân rảnh rỗi, tăng theo số đơn của sự kiện, và mỗi
 ban tổ chức mở trang là một lần quét lớn như vậy. Tính lại toàn bộ bảng tổng hợp cho 10 triệu đơn (`rebuildAll`):
 28 giây; cả bảng tổng hợp có 336.759 dòng.
+
+## Đính chính (2026-10-23)
+
+Câu ví dụ ở mục "Bối cảnh" ghi sai chiều lệch giờ: "đơn trả tiền lúc 23:30 giờ Việt Nam là ngày hôm đó, dù theo giờ UTC
+của server đã sang ngày hôm sau". Việt Nam là UTC+7, nên 23:30 giờ Việt Nam là 16:30 UTC **cùng ngày**, chưa sang ngày
+hôm sau. Bẫy múi giờ thật là:
+
+- Đơn lúc 23:30 ngày 1/11 và đơn lúc 00:30 ngày 2/11 (giờ Việt Nam) là 16:30 và 17:30 UTC, cùng ngày 1/11: gom theo ngày
+  UTC thì hai đơn rơi vào một ngày, trong khi với ban tổ chức đó là hai ngày.
+- Đơn lúc 06:30 sáng 2/11 giờ Việt Nam là 23:30 UTC ngày 1/11: gom theo ngày UTC thì bị xếp sang hôm trước.
+
+Quyết định không đổi: ngày bán vẫn là `(paid_at AT TIME ZONE events.time_zone)::date`. Test `SalesReportApiIT` vốn kiểm
+đúng cặp 23:30 / 00:30 ở trên. Chú thích trong `SalesRollupStore` đã được sửa theo; phần trên của ADR giữ nguyên như lúc
+chấp nhận.
