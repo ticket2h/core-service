@@ -3,17 +3,20 @@
 [![CI](https://github.com/ticket2h/core-service/actions/workflows/ci.yml/badge.svg)](https://github.com/ticket2h/core-service/actions/workflows/ci.yml)
 
 Lõi bán vé của Ticket2h: sự kiện, sơ đồ ghế, giữ chỗ, đơn hàng, thanh toán qua MockPay, phát vé QR, check-in,
-chuyển nhượng. Spring Boot 4.1, Java 25, PostgreSQL 17, Kafka 4, Flyway. Cổng 8080.
+chuyển nhượng. Spring Boot 4.1, Java 25, PostgreSQL 17, Kafka 4, Redis 7, Flyway. Cổng 8080.
 
 Đây là phần lõi của dự án TicketRush M1–M3 (`ticketrush-m2-m3-huong-dan.md`) sau khi
-tách microservice, cộng thêm M4 (dữ liệu lớn). Email vé đã chuyển sang `notification-service`; tài khoản, đăng nhập và phát JWT sang
+tách microservice, cộng thêm M4 (dữ liệu lớn), M5 (sơ đồ ghế trực tiếp, phòng chờ, giới hạn request, cache, chạy
+nhiều instance) và một phần M6 (đối soát thanh toán, lịch sử thao tác). Email vé đã chuyển sang `notification-service`; tài khoản, đăng nhập và phát JWT sang
 `identity-service` (core chỉ kiểm tra JWT bằng JWKS). Kiến trúc cả hệ thống ở [infra/docs/kien-truc.md](https://github.com/ticket2h/infra/blob/main/docs/kien-truc.md).
 
 Mới học Spring? Đọc [`docs/huong-dan-hoc-code.md`](docs/huong-dan-hoc-code.md): giải thích code và chức năng từ cơ bản.
 
 ## Chạy
 
-Cần PostgreSQL, Kafka, các biến ở [`.env.example`](.env.example), và identity-service để kiểm tra đăng nhập. Cách nhanh
+Cần PostgreSQL, Kafka, Redis, các biến ở [`.env.example`](.env.example), và identity-service để kiểm tra đăng nhập.
+Redis không chạy thì core vẫn bán vé được (sơ đồ ghế quay về tải lại định kỳ, giới hạn request tạm bỏ qua), chỉ sự
+kiện bật phòng chờ là không vào hàng được. Cách nhanh
 nhất: clone repo [infra](https://github.com/ticket2h/infra) cạnh repo này (hướng dẫn từ máy trống:
 [infra/docs/chay-tren-may-moi.md](https://github.com/ticket2h/infra/blob/main/docs/chay-tren-may-moi.md)):
 
@@ -104,6 +107,15 @@ nghìn đơn, vé, lượt quét) sinh ngay trong PostgreSQL bằng `generate_se
 | Microservice: hợp đồng với notification-service | `TicketEventsContractIT`, `InternalApiIT` |
 | Microservice: chỉ tin JWT do identity ký (RS256), từ chối khoá lạ, HS256, sai issuer | `JwtVerificationIT` |
 | Microservice: identity sập → 502, không đổi dữ liệu; không dò được email | `IdentityOutageIT`, `JwksUnavailableIT`, `OrganizerStaffApiIT` |
+| M5: ghế đổi trạng thái hiện ở máy khác dưới 1 giây, kể cả khi nối vào instance khác | `SeatMapLiveIT` (chạy thêm một instance core thật trong test) |
+| M5: 1.000 thay đổi mỗi giây gửi theo lô 300 ms; mất mạng nối lại nhận đủ trạng thái | `SeatMapLiveIT` (30 ghế đổi gần như cùng lúc → tối đa vài lô; `resync` khi lỡ message) |
+| M5: phòng chờ, mỗi giây N người, ai cũng thấy thứ tự của mình | `WaitingRoomIT` |
+| M5: giới hạn request theo user và IP | `RateLimitIT` |
+| M5: cache không bị dồn truy vấn khi nhiều người mở cùng lúc | `CacheStampedeIT` (200 request, 1 truy vấn), `RefreshAheadCacheTest` |
+| M5: giữ ghế bằng database so với có Redis lọc trước | `SeatGateComparisonIT` (số đo ở ADR-028) |
+| M5: load test giờ mở bán: không bán trùng, không 5xx, p95 | `../infra/scripts/loadtest.sh` (k6, ADR-029 ở infra) |
+| M6: đơn kẹt ở chờ thanh toán được job đối soát sửa | `PaymentReconciliationIT` |
+| M6: lịch sử thao tác nhạy cảm, không sửa xoá được | `AuditLogIT` |
 
 Các test quan trọng nằm trong package `acceptance`: không sửa để cho xanh, sửa code.
 
@@ -125,6 +137,11 @@ Các test quan trọng nằm trong package `acceptance`: không sửa để cho 
   rồi `EXPLAIN (ANALYZE, BUFFERS)` các câu trong ADR-016…019 để thấy chỗ khác nhau giữa OFFSET và keyset, giữa tính
   thẳng và bảng tổng hợp, và partition pruning.
 - **Bất biến dữ liệu**: `docker exec -i ticket2h-postgres-1 psql -U core < scripts/invariants.sql`.
+- **Sơ đồ ghế trực tiếp qua hai instance** (M5): trong `../infra`: `docker compose --profile apps --profile scale up -d`,
+  mở trang sự kiện ở hai trình duyệt (gateway chia hai trình duyệt vào hai instance), giữ ghế ở một bên → bên kia thấy
+  ghế xám ngay. Xem luồng thô: `curl -N localhost:8080/events/<eventId>/seats/stream`.
+- **Redis sập** (M5): `docker compose stop redis` → vẫn đặt vé được, sơ đồ ghế tải lại 15 giây một lần, phòng chờ
+  trả 503; `docker compose start redis` → trình duyệt tự nối lại SSE.
 - **Gọi API nội bộ bằng tay**: `curl -H "X-Internal-Api-Key: $INTERNAL_API_KEY_NOTIFICATION" 'localhost:8080/internal/tickets?ids=<ticketId>'`
   (khoá lấy trong `../infra/.env`; tra tài khoản giờ ở identity-service: `localhost:8082/internal/users/<userId>`).
 
@@ -134,20 +151,24 @@ Các test quan trọng nằm trong package `acceptance`: không sửa để cho 
 core-service/
 ├── src/main/java/com/ticket2h/
 │   ├── common/        cấu hình, Clock, lỗi (ProblemDetail), kiểm tra JWT (JWKS) và khoá API nội bộ, event Kafka,
-│   │                  đọc/ghi CSV (csv/), cursor phân trang keyset (paging/)
+│   │                  đọc/ghi CSV (csv/), cursor phân trang keyset (paging/), bảng con theo tháng (persistence/),
+│   │                  cache làm mới ở nền (cache/), giới hạn request (ratelimit/), cầu dao Redis (redis/)
+│   ├── audit/         lịch sử thao tác nhạy cảm (M6) và API cho admin
 │   ├── identity/      client gọi identity-service (tra tài khoản theo email, theo lô id); không còn lưu tài khoản
 │   ├── catalog/       địa điểm, sự kiện, loại vé, sơ đồ ghế (cả nhập từ file CSV), tìm kiếm không dấu
-│   ├── inventory/     giữ ghế, tồn kho GA, hạn mức mỗi user, sơ đồ ghế công khai
+│   ├── inventory/     giữ ghế, tồn kho GA, hạn mức mỗi user, sơ đồ ghế công khai và trực tiếp (SSE, Redis
+│   │                  pub/sub), lớp lọc ghế bằng Redis (bản thử)
+│   ├── waitingroom/   phòng chờ lúc mở bán (hàng chờ trong Redis, vé vào cửa ký HMAC)
 │   ├── ordering/      đơn hàng, idempotency, hết hạn, huỷ, kênh bán; danh sách đơn cho ban tổ chức (keyset)
-│   ├── payment/       tạo thanh toán, webhook, hoàn tiền
+│   ├── payment/       tạo thanh toán, webhook, hoàn tiền, đối soát với cổng
 │   ├── outbox/        ghi và phát outbox event, cấu hình Kafka
 │   ├── ticketing/     phát vé, QR, check-in, chuyển nhượng; API nội bộ /internal/tickets; file CSV danh sách
 │   │                  khách, lịch sử soát vé; bảng con theo tháng của checkin_logs
 │   ├── reporting/     báo cáo doanh thu: hàng đợi, job cộng dồn vào bảng tổng hợp, API cho ban tổ chức
 │   └── dev/           dữ liệu mẫu và endpoint chỉ có ở profile dev; công cụ sinh dữ liệu lớn (datagen/)
 ├── src/main/resources/db/migration/   Flyway V1–V2 (M1), V100–V102 (M2), V110–V112 (M3), V113–V114 (tách notification, identity),
-│                                      V115–V117 (M4)
-├── docs/                              api.md, schema.md, adr/ (001–010, 016–020), huong-dan-hoc-code.md
+│                                      V115–V117 (M4), V118–V119 (M6), V120–V121 (M5)
+├── docs/                              api.md, schema.md, adr/ (001–010, 016–020, 022, 024, 025, 027, 028), huong-dan-hoc-code.md
 ├── scripts/invariants.sql
 ├── Dockerfile, .env.example           image và biến môi trường (CI: .github/workflows/ci.yml)
 └── CLAUDE.md                          quy ước cho agent
@@ -164,11 +185,14 @@ core-service/
 | `OutboxRelay` | 0,5 giây | Đẩy outbox lên Kafka (bật/tắt riêng bằng `ticket2h.outbox.relay.enabled`) |
 | `SalesRollup.applyPending` | 5 giây | Cộng đơn vừa trả tiền vào bảng tổng hợp doanh thu, mỗi lô 500 đơn (ADR-016) |
 | `CheckinLogPartitions` | 1 ngày | Tạo trước bảng con theo tháng của `checkin_logs` cho 3 tháng tới (ADR-019) |
+| `PaymentReconciliation` | 1 phút | Hỏi MockPay về payment chưa có kết quả sau 2 phút, xử lý như webhook (ADR-022) |
+| `AuditLogPartitions` | 1 ngày | Tạo trước bảng con theo tháng của `audit_logs` cho 3 tháng tới |
+| `WaitingRoom.admitDue` | 1 giây | Cho N người đầu hàng vào ở mọi sự kiện có phòng chờ đang bán; Redis bảo đảm mỗi giây chỉ một instance làm (ADR-027) |
 
 ## Việc để các mốc sau
 
 - api-gateway: [infra/docs/kien-truc.md](https://github.com/ticket2h/infra/blob/main/docs/kien-truc.md), mục "Lộ trình tách tiếp".
-- Job đối soát với MockPay khi webhook bị mất hẳn (`dropWebhook`): M6.
 - Email vé vào DLT của notification-service (mail server sập quá 10 phút) phải gửi lại tay.
-- Rate limit (đăng nhập, chuyển nhượng), phòng chờ, cache: M5.
-- Bộ đếm GA một dòng là điểm nghẽn đã biết (ADR-003): đo bằng k6 ở M5.
+- Bộ đếm GA một dòng là điểm nghẽn đã biết (ADR-003): load test M5 mới đo ghế có số, chưa đo riêng vé GA.
+- Sơ đồ ghế theo khu (sự kiện 100.000 ghế: ảnh chụp 20MB, nén còn 2MB): tải và nghe SSE theo từng khu (ADR-024).
+- M6 còn lại: metrics và dashboard, dead letter queue, mã hoá số điện thoại, deploy.

@@ -13,6 +13,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import com.ticket2h.audit.AuditAction;
+import com.ticket2h.audit.AuditEntry;
+import com.ticket2h.audit.AuditLog;
 import com.ticket2h.catalog.CatalogQueries;
 import com.ticket2h.catalog.EventSnapshot;
 import com.ticket2h.common.csv.CsvWriter;
@@ -44,11 +47,13 @@ public class AttendeeExport {
     private final CatalogQueries catalog;
     private final TicketStore tickets;
     private final UserDirectory users;
+    private final AuditLog audit;
 
-    AttendeeExport(CatalogQueries catalog, TicketStore tickets, UserDirectory users) {
+    AttendeeExport(CatalogQueries catalog, TicketStore tickets, UserDirectory users, AuditLog audit) {
         this.catalog = catalog;
         this.tickets = tickets;
         this.users = users;
+        this.audit = audit;
     }
 
     /**
@@ -77,15 +82,31 @@ public class AttendeeExport {
         } catch (UncheckedIOException e) {
             log.warn("Ngừng xuất danh sách khách sự kiện {} sau {} dòng: không ghi được ra client ({})", eventId,
                     written, e.getMessage());
+            recordExport(organizerId, eventId, written, false);
             return written;
         } catch (RuntimeException e) {
             log.error("Lỗi khi xuất danh sách khách sự kiện {} sau {} dòng", eventId, written, e);
             markIncomplete(csv);
+            recordExport(organizerId, eventId, written, false);
             return written;
         }
         log.info("Đã xuất {} khách của sự kiện {} trong {} ms", written, eventId,
                 (System.nanoTime() - started) / 1_000_000);
+        recordExport(organizerId, eventId, written, true);
         return written;
+    }
+
+    /**
+     * Danh sách khách có họ tên, email: ai tải, lúc nào, bao nhiêu dòng đều được ghi lịch sử (ADR-023), kể cả khi file
+     * bị cắt giữa chừng. Không có transaction để gắn vào nên ghi riêng; ghi lỗi thì chỉ log, file đã gửi rồi.
+     */
+    private void recordExport(UUID organizerId, UUID eventId, int rows, boolean complete) {
+        try {
+            audit.recordNow(AuditEntry.of(AuditAction.ATTENDEES_EXPORTED, eventId).organizer(organizerId)
+                    .event(eventId).detail("rows", rows).detail("complete", complete));
+        } catch (RuntimeException e) {
+            log.error("Không ghi được lịch sử tải danh sách khách sự kiện {}", eventId, e);
+        }
     }
 
     private Batch batch(UUID eventId, AttendeeRow after) {

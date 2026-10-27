@@ -1,5 +1,6 @@
 package com.ticket2h.catalog;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -21,8 +22,17 @@ public class CatalogQueries {
     }
 
     public Optional<EventSnapshot> findEvent(UUID eventId) {
-        return store.findEvent(eventId).map(e -> new EventSnapshot(e.id(), e.organizerId(), e.title(), e.status(),
-                e.startsAt(), e.saleOpensAt(), e.saleClosesAt(), e.maxTicketsPerUser(), e.timeZone()));
+        return store.findEvent(eventId).map(CatalogQueries::snapshot);
+    }
+
+    /** Sự kiện có phòng chờ đang trong giờ bán. */
+    public List<EventSnapshot> eventsWithOpenWaitingRoom(Instant now) {
+        return store.eventsWithOpenWaitingRoom(now).stream().map(CatalogQueries::snapshot).toList();
+    }
+
+    private static EventSnapshot snapshot(EventRow e) {
+        return new EventSnapshot(e.id(), e.organizerId(), e.title(), e.status(), e.startsAt(), e.saleOpensAt(),
+                e.saleClosesAt(), e.maxTicketsPerUser(), e.timeZone(), e.waitingRoomAdmitPerSecond());
     }
 
     /**

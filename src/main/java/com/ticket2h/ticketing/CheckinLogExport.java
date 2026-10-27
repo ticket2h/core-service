@@ -18,6 +18,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import com.ticket2h.audit.AuditAction;
+import com.ticket2h.audit.AuditEntry;
+import com.ticket2h.audit.AuditLog;
 import com.ticket2h.catalog.CatalogQueries;
 import com.ticket2h.catalog.EventSnapshot;
 import com.ticket2h.common.csv.CsvWriter;
@@ -44,12 +47,15 @@ public class CheckinLogExport {
     private final CheckinLogStore logs;
     private final UserDirectory users;
     private final CheckinLogReader reader;
+    private final AuditLog audit;
 
-    CheckinLogExport(CatalogQueries catalog, CheckinLogStore logs, UserDirectory users, CheckinLogReader reader) {
+    CheckinLogExport(CatalogQueries catalog, CheckinLogStore logs, UserDirectory users, CheckinLogReader reader,
+            AuditLog audit) {
         this.catalog = catalog;
         this.logs = logs;
         this.users = users;
         this.reader = reader;
+        this.audit = audit;
     }
 
     /**
@@ -76,6 +82,7 @@ public class CheckinLogExport {
 
         CsvWriter csv = new CsvWriter(output.get()).bom().row(HEADER);
         AtomicInteger written = new AtomicInteger();
+        boolean complete = false;
         try {
             reader.read(eventId, start, end, row -> {
                 UserContact who = staff.get(row.staffUserId());
@@ -88,6 +95,7 @@ public class CheckinLogExport {
                 }
             });
             csv.flush();
+            complete = true;
         } catch (UncheckedIOException e) {
             log.warn("Ngừng xuất lịch sử soát vé sự kiện {} sau {} dòng: không ghi được ra client ({})", eventId,
                     written.get(), e.getMessage());
@@ -98,6 +106,13 @@ public class CheckinLogExport {
             } catch (UncheckedIOException ignored) {
                 // client đã ngắt kết nối
             }
+        }
+        try {
+            audit.recordNow(AuditEntry.of(AuditAction.CHECKINS_EXPORTED, eventId).organizer(organizerId).event(eventId)
+                    .detail("from", first).detail("to", last).detail("rows", written.get())
+                    .detail("complete", complete));
+        } catch (RuntimeException e) {
+            log.error("Không ghi được lịch sử tải lịch sử soát vé sự kiện {}", eventId, e);
         }
         return written.get();
     }

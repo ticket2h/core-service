@@ -79,6 +79,22 @@ class CatalogStore {
                 """, eventParams(e));
     }
 
+    int setWaitingRoom(UUID id, Integer admitPerSecond, Instant now) {
+        return jdbc.update("""
+                UPDATE events SET waiting_room_admit_per_second = :rate, updated_at = :now WHERE id = :id
+                """, new MapSqlParameterSource().addValue("id", id).addValue("rate", admitPerSecond)
+                .addValue("now", Times.utc(now)));
+    }
+
+    /** Sự kiện có phòng chờ đang trong giờ bán (job cho người vào mỗi giây). */
+    List<EventRow> eventsWithOpenWaitingRoom(Instant now) {
+        return jdbc.query("""
+                SELECT * FROM events
+                WHERE waiting_room_admit_per_second IS NOT NULL AND status = 'PUBLISHED'
+                  AND sale_opens_at <= :now AND sale_closes_at > :now
+                """, Map.of("now", Times.utc(now)), CatalogStore::event);
+    }
+
     /** Khoá dòng sự kiện để các thay đổi của ban tổ chức (thêm loại vé, công bố) chạy lần lượt. */
     Optional<EventRow> lockEvent(UUID id) {
         return jdbc.query("SELECT * FROM events WHERE id = :id FOR UPDATE", Map.of("id", id), CatalogStore::event)
@@ -138,6 +154,12 @@ class CatalogStore {
     }
 
     // ---------- ticket types ----------
+
+    /** Đổi giá. Đơn đã tạo giữ giá lúc mua ({@code order_items.unit_price}); chỉ đơn mới dùng giá mới. */
+    int updateTicketTypePrice(UUID eventId, UUID ticketTypeId, BigDecimal price) {
+        return jdbc.update("UPDATE ticket_types SET price = :price WHERE id = :id AND event_id = :eventId",
+                Map.of("price", price, "id", ticketTypeId, "eventId", eventId));
+    }
 
     void insertTicketType(UUID id, UUID eventId, String name, TicketKind kind, BigDecimal price,
             Integer quantity, Instant now) {
@@ -235,15 +257,17 @@ class CatalogStore {
 
     // ---------- staff ----------
 
-    void assignStaff(UUID eventId, UUID userId) {
-        jdbc.update("""
+    /** @return 1 nếu vừa phân công, 0 nếu đã được phân công từ trước */
+    int assignStaff(UUID eventId, UUID userId) {
+        return jdbc.update("""
                 INSERT INTO event_staff (event_id, user_id) VALUES (:eventId, :userId)
                 ON CONFLICT DO NOTHING
                 """, Map.of("eventId", eventId, "userId", userId));
     }
 
-    void removeStaff(UUID eventId, UUID userId) {
-        jdbc.update("DELETE FROM event_staff WHERE event_id = :eventId AND user_id = :userId",
+    /** @return 1 nếu vừa gỡ, 0 nếu không có phân công nào */
+    int removeStaff(UUID eventId, UUID userId) {
+        return jdbc.update("DELETE FROM event_staff WHERE event_id = :eventId AND user_id = :userId",
                 Map.of("eventId", eventId, "userId", userId));
     }
 
@@ -282,7 +306,7 @@ class CatalogStore {
                 ZoneId.of(rs.getString("time_zone")), instant(rs, "starts_at"), instant(rs, "sale_opens_at"),
                 instant(rs, "sale_closes_at"), EventStatus.valueOf(rs.getString("status")),
                 rs.getString("search_text"), rs.getInt("max_tickets_per_user"), instant(rs, "created_at"),
-                instant(rs, "updated_at"));
+                instant(rs, "updated_at"), rs.getObject("waiting_room_admit_per_second", Integer.class));
     }
 
     static Instant instant(ResultSet rs, String column) throws SQLException {

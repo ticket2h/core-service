@@ -14,7 +14,13 @@ public record EventSnapshot(
         Instant saleOpensAt,
         Instant saleClosesAt,
         int maxTicketsPerUser,
-        ZoneId timeZone) {
+        ZoneId timeZone,
+        Integer waitingRoomAdmitPerSecond) {
+
+    /** Có phòng chờ (ADR-027): trong giờ bán, đặt vé phải có vé vào cửa. */
+    public boolean hasWaitingRoom() {
+        return waitingRoomAdmitPerSecond != null;
+    }
 
     public boolean isOnSale(Instant now) {
         return status == EventStatus.PUBLISHED && !now.isBefore(saleOpensAt) && now.isBefore(saleClosesAt);

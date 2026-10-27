@@ -64,6 +64,16 @@
 			<artifactId>spring-boot-starter-actuator</artifactId>
 		</dependency>
 		<dependency>
+			<!-- M5: phòng chờ, giới hạn request, kênh phát thay đổi ghế giữa các instance (pub/sub), thử giữ ghế bằng Redis -->
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-redis</artifactId>
+		</dependency>
+		<dependency>
+			<!-- M5: cache trong bộ nhớ của từng instance, làm mới ở nền, cho sự kiện và sơ đồ ghế lúc mở bán (ADR-025) -->
+			<groupId>com.github.ben-manes.caffeine</groupId>
+			<artifactId>caffeine</artifactId>
+		</dependency>
+		<dependency>
 			<!-- Ảnh QR cho endpoint GET /tickets/{id}/qr -->
 			<groupId>com.google.zxing</groupId>
 			<artifactId>core</artifactId>

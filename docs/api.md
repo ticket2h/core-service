@@ -37,14 +37,14 @@ TypeScript từ đây (`npm run api:types`).
 | POST | `/organizer/events/{id}/staff` | ORGANIZER chủ sự kiện | `{email}` của tài khoản STAFF → 201 `{userId, email, fullName}` |
 | DELETE | `/organizer/events/{id}/staff/{userId}` | ORGANIZER chủ sự kiện | |
 | GET | `/events?q=&page=&size=` | Mọi người | Sự kiện đã công bố. `q` tìm không dấu: "son tung" ra "Sơn Tùng" |
-| GET | `/events/{id}` | Mọi người | Chi tiết, loại vé, số vé còn |
+| GET | `/events/{id}` | Mọi người | Chi tiết, loại vé, số vé còn, `waitingRoom` (M5). Qua cache, cũ tối đa khoảng 2 giây (ADR-025) |
 
 ## M2: đặt vé, thanh toán
 
 | Method | Đường dẫn | Ai gọi | Ghi chú |
 |---|---|---|---|
-| GET | `/events/{eventId}/seats` | Mọi người | Trạng thái hiệu lực; không trả `order_id`, `held_until` |
-| POST | `/orders` | CUSTOMER | Bắt buộc header `Idempotency-Key` (≤ 64 ký tự). 201 lần đầu; gửi lại cùng key và nội dung: 200 + `Idempotent-Replayed: true`. `channel` (M4, tuỳ chọn): `WEB` (mặc định) hoặc `MOBILE_APP`, cho báo cáo doanh thu |
+| GET | `/events/{eventId}/seats` | Mọi người | Trạng thái hiệu lực; không trả `order_id`, `held_until`. M5: mỗi ghế có `version`; header `Seat-Map-Seq`, `ETag` (`If-None-Match` khớp → 304), `Cache-Control: no-cache`; cũ tối đa khoảng 1 giây (ADR-024, ADR-025) |
+| POST | `/orders` | CUSTOMER | Bắt buộc header `Idempotency-Key` (≤ 64 ký tự). 201 lần đầu; gửi lại cùng key và nội dung: 200 + `Idempotent-Replayed: true`. `channel` (M4, tuỳ chọn): `WEB` (mặc định) hoặc `MOBILE_APP`, cho báo cáo doanh thu. M5: sự kiện có phòng chờ, trong giờ bán, cần header `Admission-Token` (ADR-027); giới hạn 5 đơn liền nhau rồi 6 đơn/phút mỗi người (ADR-026) |
 | GET | `/orders/{orderId}` | Chủ đơn | Người khác nhận 404 |
 | GET | `/me/orders` | Đã đăng nhập | 50 đơn gần nhất |
 | POST | `/orders/{orderId}/cancel` | Chủ đơn | Chỉ khi `PENDING_PAYMENT` |
@@ -74,6 +74,29 @@ TypeScript từ đây (`npm run api:types`).
 | GET | `/organizer/events/{id}/checkins.csv?from=&to=` | ORGANIZER chủ sự kiện | Lịch sử soát vé trong khoảng ngày (theo múi giờ sự kiện, tối đa 31 ngày; mặc định ngày diễn ±1). Đọc theo luồng bằng cursor của PostgreSQL (fetch size) |
 | POST | `/organizer/events/{id}/seats/import` | ORGANIZER chủ sự kiện | Body là file CSV (`Content-Type: text/csv`, UTF-8, ≤ 5MB, ≤ 100.000 ghế), tiêu đề `loai_ve,khu,hang,so_ghe`. 201 `{created, ticketTypes: [{ticketType, created}]}`. Có lỗi thì không thêm ghế nào: 422 `SEAT_IMPORT_INVALID` (ADR-020). Chỉ khi DRAFT |
 
+## M5: thời gian thực, phòng chờ
+
+| Method | Đường dẫn | Ai gọi | Ghi chú |
+|---|---|---|---|
+| GET | `/events/{eventId}/seats/stream` | Mọi người | SSE (`text/event-stream`), ADR-024. Event `hello {seq}` lúc nối, `seats {seq, changes: [{seatId, section, status, version}]}` gom mỗi 300 ms, `resync {seq}` khi instance lỡ message. Cách ghép với ảnh chụp: mở luồng trước, tải `/seats` sau; ảnh chụp có `Seat-Map-Seq` nhỏ hơn `seq` của `hello`/`resync` thì tải lại; chỉ áp thay đổi có `version` lớn hơn. Quá số kết nối của instance → 503 |
+| POST | `/events/{eventId}/waiting-room` | Đã đăng nhập | Vào hàng chờ (gọi lại giữ chỗ cũ, cũng là báo "vẫn đang chờ"), ADR-027. Trả `{state, position, waiting, estimatedWaitSeconds, pollAfterSeconds, admissionToken, admissionExpiresAt}`; `state`: `NOT_REQUIRED` (không có phòng chờ), `WAITING`, `ADMITTED` (kèm vé vào cửa 10 phút), `NOT_IN_QUEUE`. Mở từ 30 phút trước giờ mở bán; đến trước giờ mở bán được xếp ngẫu nhiên |
+| GET | `/events/{eventId}/waiting-room` | Đã đăng nhập | Như trên nhưng không tự vào hàng (`NOT_IN_QUEUE` nếu chưa xếp hoặc đã bị bỏ vì quá 1 phút không hỏi) |
+| PUT | `/organizer/events/{id}/waiting-room` | ORGANIZER chủ sự kiện | `{admitPerSecond}` (1–10.000) để bật, `{}` hoặc `null` để tắt. Đổi được cả khi đang bán; ghi lịch sử thao tác |
+| GET | `/organizer/events/{id}/waiting-room` | ORGANIZER chủ sự kiện | `{admitPerSecond, waiting, admitted}` |
+
+Giới hạn request (ADR-026 ở infra): mọi API trừ webhook, `/internal/**`, actuator: 300 request dồn một lúc, trung bình
+100/giây mỗi IP; vượt → 429 `TOO_MANY_REQUESTS` kèm header `Retry-After` (giây) và `retryAfterSeconds`.
+
+## M6: vận hành
+
+| Method | Đường dẫn | Ai gọi | Ghi chú |
+|---|---|---|---|
+| PUT | `/organizer/events/{id}/ticket-types/{typeId}/price` | ORGANIZER chủ sự kiện | `{price}`. Đổi được cả khi đang bán; đơn đã tạo giữ giá lúc mua. Ghi lịch sử thao tác |
+| GET | `/admin/audit-logs?action=&organizerId=&eventId=&cursor=&limit=` | ADMIN | Lịch sử thao tác nhạy cảm (ADR-023 ở infra), mới nhất trước, phân trang keyset; `limit` 1–100 (mặc định 50). Mỗi dòng: `occurredAt`, `actor {type: USER\|SYSTEM, id, role, name, email, fullName}`, `action`, `targetType`, `targetId`, `organizerId`, `eventId`, `details` |
+
+Job đối soát thanh toán (ADR-022) không có API: chạy mỗi phút, hỏi MockPay
+`GET /api/v1/payments/by-ref/{paymentId}` cho payment chưa có kết quả.
+
 ## Mã lỗi
 
 | `code` | HTTP | Khi nào |
@@ -83,11 +106,13 @@ TypeScript từ đây (`npm run api:types`).
 | `UNAUTHENTICATED` | 401 | Thiếu hoặc sai JWT |
 | `INVALID_WEBHOOK_SIGNATURE` | 401 | Webhook sai chữ ký hoặc quá hạn |
 | `FORBIDDEN` | 403 | Sai vai trò; sự kiện của BTC khác; nhân viên không được phân công |
+| `ADMISSION_REQUIRED` | 403 | Đặt vé sự kiện có phòng chờ mà thiếu `Admission-Token`, hoặc vé vào cửa sai người, sai sự kiện, hết hạn |
 | `NOT_FOUND` | 404 | Không tồn tại **hoặc không phải của bạn** |
 | `RECIPIENT_NOT_FOUND` | 404 | Chuyển nhượng cho email không có tài khoản khách hàng |
 | `EVENT_NOT_EDITABLE` | 409 | Thêm loại vé/ghế cho sự kiện đã công bố |
 | `EVENT_NOT_PUBLISHABLE` | 409 | Công bố khi chưa có loại vé, chưa có ghế, hoặc đã hết giờ bán |
 | `SALE_NOT_OPEN` | 409 | Ngoài giờ mở bán |
+| `WAITING_ROOM_NOT_OPEN` | 409 | Vào hàng chờ sớm hơn 30 phút trước giờ mở bán, hoặc sau giờ đóng bán |
 | `SEAT_UNAVAILABLE` | 409 | Có ghế đã được giữ hoặc đã bán (kèm `unavailableSeatIds`) |
 | `SOLD_OUT` | 409 | Không đủ vé GA |
 | `PURCHASE_LIMIT_EXCEEDED` | 409 | Vượt số vé tối đa mỗi user |
@@ -99,9 +124,12 @@ TypeScript từ đây (`npm run api:types`).
 | `PAYLOAD_TOO_LARGE` | 413 | Webhook lớn hơn 64KB; file ghế lớn hơn 5MB |
 | `IDEMPOTENCY_KEY_REUSED` | 422 | Cùng key nhưng nội dung khác |
 | `SEAT_IMPORT_INVALID` | 422 | File ghế có lỗi: kèm `errors` (tối đa 200 lỗi đầu, mỗi lỗi `{line, message}`, sắp theo dòng) và `errorCount` (tổng số lỗi). Không ghế nào được thêm |
+| `TOO_MANY_REQUESTS` | 429 | Vượt giới hạn request theo IP hoặc theo người dùng; header `Retry-After` |
 | `INTERNAL_ERROR` | 500 | Lỗi không lường trước (đã log) |
 | `PAYMENT_GATEWAY_UNAVAILABLE` | 502 | Gọi MockPay thất bại hoặc quá thời gian |
 | `IDENTITY_UNAVAILABLE` | 502 | identity-service không trả lời: lúc tra tài khoản (chuyển nhượng, phân công, danh sách nhân viên, danh sách đơn, file danh sách khách), hoặc lúc core chưa lấy được public key để kiểm tra token |
+| `WAITING_ROOM_UNAVAILABLE` | 503 | Redis không trả lời lúc vào hàng hay hỏi thứ tự (người đã có vé vào cửa vẫn đặt vé được) |
+| `SEAT_MAP_STREAM_UNAVAILABLE` | 503 | Instance đã mở đủ số kết nối SSE (`ticket2h.seat-map.max-streams`); web quay về tải lại định kỳ |
 
 `INVALID_CREDENTIALS`, `EMAIL_ALREADY_REGISTERED` nay do identity-service trả.
 

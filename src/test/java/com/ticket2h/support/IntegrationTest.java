@@ -16,6 +16,8 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import com.ticket2h.common.redis.RedisBreaker;
+
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -32,7 +34,7 @@ public abstract class IntegrationTest {
 
     private static final String TRUNCATE = """
             TRUNCATE checkin_logs, ticket_transfers, tickets, outbox_events,
-                     sales_rollup_queue, sales_daily_items, sales_daily_orders,
+                     sales_rollup_queue, sales_daily_items, sales_daily_orders, audit_logs,
                      payment_webhook_logs, payments, order_items, purchase_quotas, orders, event_staff,
                      seats, ticket_types, events, venues
             RESTART IDENTITY CASCADE
@@ -47,6 +49,7 @@ public abstract class IntegrationTest {
     @Autowired protected BulkData bulkData;
     @Autowired protected JsonMapper json;
     @Autowired private KafkaListenerEndpointRegistry kafkaListeners;
+    @Autowired private RedisBreaker redisBreaker;
 
     protected final FakeGateway gateway = FakeGateway.INSTANCE;
     protected final FakeIdentity identity = FakeIdentity.INSTANCE;
@@ -65,6 +68,7 @@ public abstract class IntegrationTest {
     @BeforeEach
     void resetState() {
         truncateAll();
+        redisBreaker.reset();
         clock.set(START);
         gateway.reset();
         identity.reset();

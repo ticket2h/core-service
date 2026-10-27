@@ -33,6 +33,9 @@ public final class FakeGateway {
     private final List<JsonNode> refundRequests = new CopyOnWriteArrayList<>();
     private final AtomicInteger createFailures = new AtomicInteger();
     private final AtomicInteger refundFailures = new AtomicInteger();
+    private final Map<String, GatewayState> states = new ConcurrentHashMap<>();
+    private final List<String> statusQueries = new CopyOnWriteArrayList<>();
+    private final AtomicInteger statusFailures = new AtomicInteger();
     private volatile long createDelayMs;
 
     private FakeGateway(HttpServer server) {
@@ -43,7 +46,7 @@ public final class FakeGateway {
         try {
             HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             FakeGateway gateway = new FakeGateway(server);
-            server.createContext("/api/v1/payments", gateway::handleCreate);
+            server.createContext("/api/v1/payments", gateway::handlePayments);
             server.createContext("/api/v1/refunds", gateway::handleRefund);
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             server.start();
@@ -63,7 +66,33 @@ public final class FakeGateway {
         refundRequests.clear();
         createFailures.set(0);
         refundFailures.set(0);
+        states.clear();
+        statusQueries.clear();
+        statusFailures.set(0);
         createDelayMs = 0;
+    }
+
+    /**
+     * Khách trả tiền trên trang của cổng, nhưng KHÔNG có webhook nào được gửi (như chế độ chaos "dropWebhook" của
+     * MockPay). Chỉ đối soát ({@code GET /api/v1/payments/by-ref/...}) mới biết.
+     */
+    public void customerPaidWithoutWebhook(String merchantRef) {
+        states.computeIfPresent(merchantRef, (ref, state) -> state.with("SUCCEEDED", "tx_" + ref.replace("-", "")));
+    }
+
+    /** Đặt trạng thái phiên ở cổng: PENDING, SUCCEEDED, FAILED, CANCELLED, EXPIRED. */
+    public void gatewayStatus(String merchantRef, String status) {
+        states.computeIfPresent(merchantRef, (ref, state) -> state.with(status, state.transactionId()));
+    }
+
+    /** {@code n} lần tra trạng thái tiếp theo trả HTTP 503. */
+    public void failNextStatusQueries(int n) {
+        statusFailures.set(n);
+    }
+
+    /** merchantRef của mọi lần tra trạng thái (đối soát), theo thứ tự. */
+    public List<String> statusQueries() {
+        return statusQueries;
     }
 
     /** {@code n} lần tạo phiên tiếp theo trả HTTP 500. */
@@ -93,6 +122,40 @@ public final class FakeGateway {
         return "mp_" + merchantRef.replace("-", "");
     }
 
+    private void handlePayments(HttpExchange exchange) throws IOException {
+        if ("GET".equals(exchange.getRequestMethod())) {
+            handleStatus(exchange);
+        } else {
+            handleCreate(exchange);
+        }
+    }
+
+    /** {@code GET /api/v1/payments/by-ref/{merchantRef}}, đúng dạng của MockPay. */
+    private void handleStatus(HttpExchange exchange) throws IOException {
+        if (!authorized(exchange)) {
+            return;
+        }
+        String path = exchange.getRequestURI().getPath();
+        String merchantRef = path.substring(path.lastIndexOf('/') + 1);
+        statusQueries.add(merchantRef);
+        if (statusFailures.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
+            respond(exchange, 503, "{\"code\":\"UNAVAILABLE\"}");
+            return;
+        }
+        GatewayState state = states.get(merchantRef);
+        if (state == null) {
+            respond(exchange, 404, "{\"code\":\"NOT_FOUND\"}");
+            return;
+        }
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("status", state.status());
+        body.put("gatewayPaymentId", gatewayPaymentIdFor(merchantRef));
+        body.put("gatewayTransactionId", state.transactionId());
+        body.put("amount", state.amount());
+        body.put("currency", state.currency());
+        respond(exchange, 200, json.writeValueAsString(body));
+    }
+
     private void handleCreate(HttpExchange exchange) throws IOException {
         if (!authorized(exchange)) {
             return;
@@ -109,6 +172,8 @@ public final class FakeGateway {
         String merchantRef = body.get("merchantRef").asString();
         String gatewayId = gatewayPaymentIdFor(merchantRef);
         boolean existed = sessions.putIfAbsent(merchantRef, gatewayId) != null;
+        states.putIfAbsent(merchantRef, new GatewayState("PENDING", null, body.get("amount").decimalValue(),
+                body.get("currency").asString()));
         respond(exchange, existed ? 200 : 201, json.writeValueAsString(Map.of(
                 "gatewayPaymentId", gatewayId,
                 "paymentUrl", baseUrl() + "/pay/" + gatewayId,
@@ -143,6 +208,12 @@ public final class FakeGateway {
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
+        }
+    }
+
+    private record GatewayState(String status, String transactionId, java.math.BigDecimal amount, String currency) {
+        GatewayState with(String newStatus, String newTransactionId) {
+            return new GatewayState(newStatus, newTransactionId, amount, currency);
         }
     }
 

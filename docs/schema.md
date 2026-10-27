@@ -17,6 +17,10 @@ Nguồn sự thật là các file Flyway trong `src/main/resources/db/migration`
 | `V115__m4_sales_report.sql` | `orders.sales_channel`; hàng đợi `sales_rollup_queue`; bảng tổng hợp `sales_daily_items`, `sales_daily_orders` (ADR-016) |
 | `V116__m4_list_export_indexes.sql` | Index `orders (event_id, created_at DESC, id DESC)` cho danh sách đơn keyset (ADR-018), `tickets (event_id, issued_at, id)` cho file danh sách khách (ADR-017) |
 | `V117__m4_checkin_logs_partition.sql` | `checkin_logs` thành bảng partition theo tháng (`scanned_at`), khoá chính `(id, scanned_at)`, bảng `checkin_logs_default` hứng dòng ngoài các tháng đã tạo (ADR-019) |
+| `V118__m6_payment_reconciliation.sql` | `payments.next_reconcile_at`, `reconcile_attempts`, `reconciled_at`; index một phần cho payment chưa có kết quả (ADR-022) |
+| `V119__m6_audit_logs.sql` | `audit_logs` partition theo tháng (`occurred_at`), chỉ ghi thêm (trigger chặn UPDATE, DELETE), ADR-023 ở infra |
+| `V120__m5_seat_versions.sql` | `seats.version`: tăng mỗi lần ghế đổi trạng thái, sơ đồ ghế trực tiếp dùng để không áp thay đổi cũ (ADR-024) |
+| `V121__m5_waiting_room.sql` | `events.waiting_room_admit_per_second` (NULL: không có phòng chờ), index một phần cho job cho người vào (ADR-027) |
 
 ## Ràng buộc là lớp chặn cuối cùng
 
@@ -35,14 +39,22 @@ Nguồn sự thật là các file Flyway trong `src/main/resources/db/migration`
 | Kênh bán là giá trị đã biết | `orders_sales_channel_check` |
 | Mỗi đơn chờ cộng vào báo cáo đúng một lần | `sales_rollup_queue` khoá chính `order_id` |
 | Số liệu tổng hợp không âm | `sales_daily_items_non_negative`, `sales_daily_orders_non_negative` |
+| Lịch sử thao tác không sửa, không xoá được | trigger `audit_logs_append_only`; `audit_logs_user_has_id`, `audit_logs_system_has_name` |
+| Số người vào phòng chờ mỗi giây hợp lệ | `events_waiting_room_rate_check` (1–10.000 hoặc NULL) |
 
 ## Bảng nào đổi bằng gì
 
 | Bảng | Cách đổi trạng thái |
 |---|---|
 | `orders`, `payments` | JPA entity; khoá `SELECT ... FOR UPDATE` rồi gọi method của entity |
-| `seats`, `ticket_types` (GA), `purchase_quotas`, `tickets` | SQL có điều kiện qua `NamedParameterJdbcTemplate`, kiểm tra số dòng |
+| `seats`, `ticket_types` (GA), `purchase_quotas`, `tickets` | SQL có điều kiện qua `NamedParameterJdbcTemplate`, kiểm tra số dòng. Ghế: mọi câu đổi trạng thái tăng `version` và `RETURNING` các ghế đã đổi cho sơ đồ trực tiếp (`SeatHoldService`) |
 | `events`, `venues` | SQL (`CatalogStore`) |
 | `outbox_events`, `payment_webhook_logs`, `checkin_logs` | SQL |
 | `sales_rollup_queue`, `sales_daily_items`, `sales_daily_orders` | SQL (`SalesRollupStore`): ghi hàng đợi lúc đơn PAID, job lấy-xoá-cộng trong một câu lệnh |
 | bảng con `checkin_logs_YYYY_MM` | `CheckinLogPartitions` tạo trước 3 tháng, mỗi ngày một lần |
+| `payments` (cột đối soát) | JDBC (`PaymentReconciliationSteps`): nhận việc bằng `SKIP LOCKED`; entity chỉ ghi `next_reconcile_at` lúc tạo |
+| `audit_logs` | Chỉ `INSERT` (`AuditLog.record`, cùng transaction với thay đổi); bảng con theo tháng do `AuditLogPartitions` tạo |
+
+Ngoài PostgreSQL (M5), Redis chỉ giữ thứ mất được: hàng chờ của phòng chờ, xô giới hạn request, số thứ tự của kênh
+thay đổi ghế, khoá của lớp lọc ghế. Redis khởi động lại thì người đang xếp hàng phải xếp lại; không mất đơn, vé hay
+tiền.

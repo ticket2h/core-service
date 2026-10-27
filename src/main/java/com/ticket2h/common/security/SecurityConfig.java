@@ -48,8 +48,8 @@ public class SecurityConfig {
      */
     private static final String[] PUBLIC_POST = {"/webhooks/payments/**"};
     private static final String[] PUBLIC_GET = {
-            "/events", "/events/*", "/events/*/seats", "/payments/return", "/ticket-keys", "/actuator/health",
-            "/v3/api-docs", "/v3/api-docs/**", "/swagger-ui.html", "/swagger-ui/**"};
+            "/events", "/events/*", "/events/*/seats", "/events/*/seats/stream", "/payments/return", "/ticket-keys",
+            "/actuator/health", "/v3/api-docs", "/v3/api-docs/**", "/swagger-ui.html", "/swagger-ui/**"};
 
     /**
      * API cho service khác trong hệ thống (notification-service...), không dành cho người dùng: xác thực bằng
@@ -83,6 +83,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, PUBLIC_POST).permitAll()
                         .requestMatchers(HttpMethod.GET, PUBLIC_GET).permitAll()
                         .requestMatchers("/organizer/**").hasRole(Role.ORGANIZER.name())
+                        .requestMatchers("/admin/**").hasRole(Role.ADMIN.name())
                         .requestMatchers(HttpMethod.POST, "/orders").hasRole(Role.CUSTOMER.name())
                         .requestMatchers("/checkin").hasRole(Role.STAFF.name())
                         .anyRequest().authenticated())

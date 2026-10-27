@@ -9,6 +9,16 @@ spring:
 ticket2h:
   jobs:
     enabled: false               # test tự gọi job bằng tay
+  waiting-room:
+    secret: test-waiting-room-secret-0123456789abcdef
+  rate-limit:
+    # Mọi test gọi từ 127.0.0.1: xô rất lớn để không test nào bị chặn. RateLimitIT làm cạn xô bằng tay rồi kiểm tra
+    per-ip: { capacity: 1000000, refill-per-second: 1 }
+    orders: { capacity: 1000000, refill-per-second: 1 }
+    waiting-room: { capacity: 1000000, refill-per-second: 1 }
+  cache:
+    event-ttl: PT0S              # không cache: test đọc lại ngay sau khi đổi; SeatMapCacheIT bật lại
+    seat-map-ttl: PT0S
   payment:
     mockpay:
       api-key: test-api-key

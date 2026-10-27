@@ -1,6 +1,7 @@
 package com.ticket2h.payment;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -18,6 +19,12 @@ import com.ticket2h.common.persistence.AssignedIdEntity;
 public class Payment extends AssignedIdEntity {
 
     public static final String PROVIDER_MOCKPAY = "MOCKPAY";
+
+    /**
+     * Lần đối soát đầu tiên (ADR-022): đủ lâu để webhook bình thường đến trước, đủ sớm để đơn chưa hết hạn giữ chỗ.
+     * Các lần sau do {@link PaymentReconciliationSteps} đặt bằng JDBC.
+     */
+    static final Duration FIRST_RECONCILE_AFTER = Duration.ofMinutes(2);
 
     @Column(updatable = false)
     private UUID orderId;
@@ -44,6 +51,10 @@ public class Payment extends AssignedIdEntity {
     private Instant nextRefundAttemptAt;
     private String lastError;
 
+    /** Chỉ ghi lúc tạo; sau đó {@link PaymentReconciliationSteps} cập nhật bằng JDBC, Hibernate không ghi đè. */
+    @Column(updatable = false)
+    private Instant nextReconcileAt;
+
     @Column(updatable = false)
     private Instant createdAt;
 
@@ -59,6 +70,7 @@ public class Payment extends AssignedIdEntity {
         this.amount = amount;
         this.currency = currency;
         this.expiresAt = expiresAt;
+        this.nextReconcileAt = now.plus(FIRST_RECONCILE_AFTER);
         this.createdAt = now;
         this.updatedAt = now;
     }

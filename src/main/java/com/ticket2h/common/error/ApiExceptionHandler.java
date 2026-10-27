@@ -19,6 +19,8 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
+import com.ticket2h.common.ratelimit.RateLimitedException;
+
 /** Mọi lỗi API trả theo RFC 9457 (ProblemDetail) kèm trường {@code code}. */
 @RestControllerAdvice
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
@@ -27,7 +29,11 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(BusinessException.class)
     ResponseEntity<ProblemDetail> handleBusiness(BusinessException e) {
-        return ResponseEntity.status(e.code().status()).body(ProblemDetails.of(e));
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(e.code().status());
+        if (e instanceof RateLimitedException limited) {
+            response.header(HttpHeaders.RETRY_AFTER, String.valueOf(limited.retryAfterSeconds()));
+        }
+        return response.body(ProblemDetails.of(e));
     }
 
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)

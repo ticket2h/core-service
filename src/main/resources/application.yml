@@ -39,9 +39,20 @@ spring:
     scheduling:
       pool:
         size: 4             # job hết hạn, hoàn tiền, relay không chờ nhau
+  data:
+    redis:
+      # M5: phòng chờ, giới hạn request, kênh phát thay đổi ghế giữa các instance (ADR-024…026). Redis sập thì core vẫn
+      # bán vé: sơ đồ ghế quay về tải lại định kỳ, giới hạn request tạm bỏ qua; chỉ sự kiện bật phòng chờ bị chặn vào.
+      host: localhost
+      port: 6379
+      connect-timeout: PT1S
+      timeout: PT0.5S
 
 server:
   port: 8080
+  # Sau gateway: IP thật của trình duyệt lấy từ X-Forwarded-For, chỉ tin header này khi request đến từ mạng nội bộ
+  # (Tomcat RemoteIpValve: 10/8, 172.16/12, 192.168/16, 127/8). Dùng cho giới hạn request theo IP (ADR-026)
+  forward-headers-strategy: native
 
 springdoc:
   # Mặc định springdoc ghi "*/*" cho mọi response; ghi rõ JSON để kiểu TypeScript sinh ra (web-app) gọn hơn
@@ -52,6 +63,9 @@ management:
     web:
       exposure:
         include: health,info
+  health:
+    redis:
+      enabled: false        # Redis sập không làm core "không khoẻ": bán vé vẫn chạy được (xem spring.data.redis)
 
 ticket2h:
   jobs:
@@ -89,6 +103,40 @@ ticket2h:
     # Token do identity-service phát (RS256). core chỉ kiểm tra, lấy public key từ JWKS của identity.
     issuer: ticket2h
     jwk-set-uri: http://localhost:8082/.well-known/jwks.json
+  seat-map:
+    # M5: sơ đồ ghế cập nhật trực tiếp qua SSE (ADR-024). Thay đổi gom lại, mỗi instance gửi một lần mỗi flush-interval
+    flush-interval: PT0.3S
+    stream-timeout: PT30M         # trình duyệt tự nối lại khi hết hạn
+    heartbeat: PT15S              # dòng chú thích giữ kết nối qua proxy (gateway nginx đóng kết nối im lặng sau 30s)
+    max-streams: 20000            # mỗi instance; vượt thì 503, web quay về tải lại định kỳ
+  # M5: lớp lọc trước khi giữ ghế trong database (ADR-028). database: không lọc (mặc định). redis: Redis chặn sớm
+  # request vào ghế đã có người, database vẫn là nơi quyết định. Bật để đo so sánh (infra/loadtest)
+  seat-gate: database
+  waiting-room:
+    # M5: phòng chờ (ADR-027). Khoá ký vé vào cửa: infra/.env (WAITING_ROOM_SECRET), mọi instance core dùng chung
+    secret: ${WAITING_ROOM_SECRET:}
+    opens-before-sale: PT30M      # vào xếp hàng từ 30 phút trước giờ mở bán; đến trước giờ mở bán thì xếp ngẫu nhiên
+    admission-ttl: PT10M          # được vào thì có 10 phút để đặt vé
+    stale-after: PT1M             # không hỏi thứ tự quá 1 phút (đóng tab) thì bị bỏ khỏi hàng
+  rate-limit:
+    # M5: token bucket trên Redis (ADR-026). capacity: số request dồn một lúc; refill-per-second: trung bình mỗi giây
+    enabled: true
+    per-ip:                       # mọi API trừ webhook, /internal, actuator. Mở một trang gọi vài API cùng lúc
+      capacity: 300
+      refill-per-second: 100
+    orders:                       # POST /orders, theo người dùng: 5 đơn liền nhau, sau đó 6 đơn mỗi phút
+      capacity: 5
+      refill-per-second: 0.1
+    waiting-room:                 # vào phòng chờ và hỏi thứ tự, theo người dùng (web hỏi mỗi 2–15 giây)
+      capacity: 20
+      refill-per-second: 1
+  cache:
+    # M5: cache trong bộ nhớ từng instance, làm mới ở nền (ADR-025). Mỗi instance tối đa một truy vấn cho mỗi sự kiện
+    # trong mỗi khoảng dưới đây, dù bao nhiêu người cùng mở trang; request không bao giờ phải chờ lần tải lại
+    event-ttl: PT2S               # chi tiết sự kiện (cả số vé còn): cũ tối đa khoảng 2 giây
+    seat-map-ttl: PT1S            # ảnh chụp sơ đồ ghế; thay đổi sau đó đến bằng SSE
+    max-stale: PT30S              # database không trả lời lâu hơn thì bỏ bản cũ
+    seat-map-max-size: 64MB
   identity-api:
     # Tra tài khoản theo email (chuyển nhượng vé, phân công soát vé). Khoá của core: X-Internal-Api-Key
     base-url: http://localhost:8082

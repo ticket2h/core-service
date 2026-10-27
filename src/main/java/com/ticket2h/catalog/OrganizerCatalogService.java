@@ -13,13 +13,19 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import com.ticket2h.audit.AuditAction;
+import com.ticket2h.audit.AuditEntry;
+import com.ticket2h.audit.AuditLog;
 import com.ticket2h.catalog.CatalogStore.SeatPosition;
 import com.ticket2h.common.error.BusinessException;
 import com.ticket2h.common.error.ErrorCode;
@@ -33,7 +39,8 @@ import com.ticket2h.identity.UserDirectory.UserContact;
 
 /**
  * Thao tác của ban tổ chức. Mọi method nhận {@code organizerId} của người gọi và kiểm tra sự kiện
- * thuộc ban tổ chức đó: BTC A sửa sự kiện của BTC B thì nhận 403.
+ * thuộc ban tổ chức đó: BTC A sửa sự kiện của BTC B thì nhận 403. Mỗi thao tác đổi dữ liệu ghi một dòng lịch sử
+ * ({@link AuditLog}, ADR-023) trong cùng transaction; người làm lấy từ JWT của request.
  */
 @Service
 public class OrganizerCatalogService {
@@ -41,16 +48,23 @@ public class OrganizerCatalogService {
     static final ZoneId DEFAULT_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
     private static final Locale VIETNAMESE = Locale.forLanguageTag("vi-VN");
     private static final int MAX_SEATS_PER_REQUEST = 5_000;
+    /** Cùng giới hạn với ràng buộc events_waiting_room_rate_check (V121). */
+    static final int MAX_ADMIT_PER_SECOND = 10_000;
     /** Số dòng mỗi lần gửi INSERT theo lô (JDBC batch) khi nhập ghế từ file. */
     private static final int INSERT_BATCH = 1_000;
 
     private final CatalogStore store;
     private final UserDirectory users;
+    private final AuditLog audit;
+    private final TransactionTemplate tx;
     private final Clock clock;
 
-    OrganizerCatalogService(CatalogStore store, UserDirectory users, Clock clock) {
+    OrganizerCatalogService(CatalogStore store, UserDirectory users, AuditLog audit, TransactionTemplate tx,
+            Clock clock) {
         this.store = store;
         this.users = users;
+        this.audit = audit;
+        this.tx = tx;
         this.clock = clock;
     }
 
@@ -64,6 +78,8 @@ public class OrganizerCatalogService {
     public VenueRow createVenue(UUID organizerId, String name, String address, String city) {
         UUID id = UUID.randomUUID();
         store.insertVenue(id, organizerId, name.trim(), address.trim(), city.trim(), clock.instant());
+        audit.record(AuditEntry.of(AuditAction.VENUE_CREATED, id).organizer(organizerId)
+                .detail("name", name.trim()).detail("city", city.trim()));
         return store.findVenue(id).orElseThrow();
     }
 
@@ -80,8 +96,12 @@ public class OrganizerCatalogService {
         EventRow event = new EventRow(UUID.randomUUID(), organizerId, venue.id(), fields.title().trim(),
                 fields.descriptionOrEmpty(), DEFAULT_ZONE, fields.startsAt(), fields.saleOpensAt(),
                 fields.saleClosesAt(), EventStatus.DRAFT, searchText(fields.title(), venue),
-                fields.maxTicketsPerUserOrDefault(), now, now);
+                fields.maxTicketsPerUserOrDefault(), now, now, null);
         store.insertEvent(event);
+        audit.record(AuditEntry.of(AuditAction.EVENT_CREATED, event.id()).organizer(organizerId).event(event.id())
+                .detail("title", event.title()).detail("venueId", event.venueId())
+                .detail("startsAt", event.startsAt()).detail("saleOpensAt", event.saleOpensAt())
+                .detail("saleClosesAt", event.saleClosesAt()).detail("maxTicketsPerUser", event.maxTicketsPerUser()));
         return event;
     }
 
@@ -93,8 +113,14 @@ public class OrganizerCatalogService {
         EventRow updated = new EventRow(current.id(), current.organizerId(), venue.id(), fields.title().trim(),
                 fields.descriptionOrEmpty(), current.timeZone(), fields.startsAt(), fields.saleOpensAt(),
                 fields.saleClosesAt(), current.status(), searchText(fields.title(), venue),
-                fields.maxTicketsPerUserOrDefault(), current.createdAt(), clock.instant());
+                fields.maxTicketsPerUserOrDefault(), current.createdAt(), clock.instant(),
+                current.waitingRoomAdmitPerSecond());
         store.updateEvent(updated);
+        Map<String, Object> changes = changes(current, updated);
+        if (!changes.isEmpty()) {
+            audit.record(AuditEntry.of(AuditAction.EVENT_UPDATED, eventId).organizer(organizerId).event(eventId)
+                    .detail("changes", changes));
+        }
         return updated;
     }
 
@@ -118,6 +144,8 @@ public class OrganizerCatalogService {
             throw notPublishable("Thời gian bán vé đã kết thúc");
         }
         store.markPublished(eventId, clock.instant());
+        audit.record(AuditEntry.of(AuditAction.EVENT_PUBLISHED, eventId).organizer(organizerId).event(eventId)
+                .detail("title", event.title()));
         return store.findEvent(eventId).orElseThrow();
     }
 
@@ -154,7 +182,52 @@ public class OrganizerCatalogService {
         }
         UUID id = UUID.randomUUID();
         store.insertTicketType(id, eventId, trimmed, kind, price, quantity, clock.instant());
+        audit.record(AuditEntry.of(AuditAction.TICKET_TYPE_CREATED, id).organizer(organizerId).event(eventId)
+                .detail("name", trimmed).detail("kind", kind.name()).detail("price", price)
+                .detail("quantity", quantity));
         return store.ticketTypesOf(eventId).stream().filter(t -> t.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    /**
+     * Đổi giá loại vé, kể cả khi sự kiện đang bán. Đơn đã tạo giữ giá lúc mua; đơn tạo sau dùng giá mới. Thao tác
+     * nhạy cảm nên luôn được ghi lịch sử (giá cũ, giá mới, ai đổi). Giá không đổi thì không ghi gì.
+     */
+    @Transactional
+    public TicketTypeRow changeTicketTypePrice(UUID organizerId, UUID eventId, UUID ticketTypeId, BigDecimal price) {
+        lockOwnedEvent(organizerId, eventId);
+        if (price.signum() < 0 || price.scale() > 2) {
+            throw new ValidationException("Giá vé phải >= 0 và tối đa 2 chữ số thập phân");
+        }
+        TicketTypeRow type = store.ticketTypesOf(eventId).stream()
+                .filter(t -> t.id().equals(ticketTypeId)).findFirst()
+                .orElseThrow(() -> new NotFoundException("loại vé"));
+        if (type.price().compareTo(price) == 0) {
+            return type;
+        }
+        store.updateTicketTypePrice(eventId, ticketTypeId, price);
+        audit.record(AuditEntry.of(AuditAction.TICKET_TYPE_PRICE_CHANGED, ticketTypeId).organizer(organizerId)
+                .event(eventId).detail("name", type.name()).detail("from", type.price()).detail("to", price));
+        return store.ticketTypesOf(eventId).stream().filter(t -> t.id().equals(ticketTypeId)).findFirst()
+                .orElseThrow();
+    }
+
+    /**
+     * Bật phòng chờ với {@code admitPerSecond} người vào mỗi giây, hoặc tắt ({@code null}), ADR-027. Đổi được cả lúc
+     * đang bán: tắt thì ai cũng đặt vé thẳng ngay; bật giữa chừng thì người đang ở trang đặt vé phải vào hàng.
+     */
+    @Transactional
+    public EventRow setWaitingRoom(UUID organizerId, UUID eventId, Integer admitPerSecond) {
+        EventRow event = lockOwnedEvent(organizerId, eventId);
+        if (admitPerSecond != null && (admitPerSecond < 1 || admitPerSecond > MAX_ADMIT_PER_SECOND)) {
+            throw new ValidationException("Số người vào mỗi giây từ 1 tới " + MAX_ADMIT_PER_SECOND);
+        }
+        if (Objects.equals(event.waitingRoomAdmitPerSecond(), admitPerSecond)) {
+            return event;
+        }
+        store.setWaitingRoom(eventId, admitPerSecond, clock.instant());
+        audit.record(AuditEntry.of(AuditAction.WAITING_ROOM_CHANGED, eventId).organizer(organizerId).event(eventId)
+                .detail("from", event.waitingRoomAdmitPerSecond()).detail("to", admitPerSecond));
+        return store.findEvent(eventId).orElseThrow();
     }
 
     /** Thêm một khu ghế: mỗi hàng có nhãn và dải số ghế liên tiếp. */
@@ -184,11 +257,15 @@ public class OrganizerCatalogService {
                 }
             }
         }
+        int created;
         try {
-            return store.insertSeats(eventId, ticketTypeId, positions);
+            created = store.insertSeats(eventId, ticketTypeId, positions);
         } catch (DuplicateKeyException e) {
             throw new ValidationException("Có ghế đã tồn tại ở cùng khu, hàng và số");
         }
+        audit.record(AuditEntry.of(AuditAction.SEATS_ADDED, eventId).organizer(organizerId).event(eventId)
+                .detail("ticketType", type.name()).detail("section", section.trim()).detail("seats", created));
+        return created;
     }
 
     /**
@@ -238,6 +315,8 @@ public class OrganizerCatalogService {
             }
             byTicketType.put(entry.getKey().name(), positions.size());
         }
+        audit.record(AuditEntry.of(AuditAction.SEATS_IMPORTED, eventId).organizer(organizerId).event(eventId)
+                .detail("seats", created).detail("byTicketType", byTicketType));
         return new SeatImport.ImportResult(created, byTicketType);
     }
 
@@ -255,14 +334,20 @@ public class OrganizerCatalogService {
     /**
      * KHÔNG có {@code @Transactional}: tra email là lời gọi HTTP sang identity-service, không được nằm trong
      * transaction. Kiểm tra quyền trước (BTC khác nhận 403 mà không dò được email nào tồn tại), rồi tra email,
-     * rồi một câu INSERT tự commit (ON CONFLICT DO NOTHING: phân công hai lần vẫn một dòng).
+     * rồi mới mở một transaction ngắn cho INSERT và dòng lịch sử (ON CONFLICT DO NOTHING: phân công hai lần vẫn một
+     * dòng, và chỉ ghi lịch sử lần đầu).
      */
     public UserContact assignStaff(UUID organizerId, UUID eventId, String staffEmail) {
         ownedEvent(organizerId, eventId);
         UserContact staff = users.findByEmail(staffEmail)
                 .filter(u -> u.role() == Role.STAFF)
                 .orElseThrow(() -> new ValidationException("Không có tài khoản STAFF với email này"));
-        store.assignStaff(eventId, staff.id());
+        tx.executeWithoutResult(status -> {
+            if (store.assignStaff(eventId, staff.id()) == 1) {
+                audit.record(AuditEntry.of(AuditAction.STAFF_ASSIGNED, staff.id()).organizer(organizerId)
+                        .event(eventId));
+            }
+        });
         return staff;
     }
 
@@ -293,7 +378,9 @@ public class OrganizerCatalogService {
     @Transactional
     public void removeStaff(UUID organizerId, UUID eventId, UUID staffUserId) {
         ownedEvent(organizerId, eventId);
-        store.removeStaff(eventId, staffUserId);
+        if (store.removeStaff(eventId, staffUserId) == 1) {
+            audit.record(AuditEntry.of(AuditAction.STAFF_REMOVED, staffUserId).organizer(organizerId).event(eventId));
+        }
     }
 
     private EventRow ownedEvent(UUID organizerId, UUID eventId) {
@@ -323,6 +410,30 @@ public class OrganizerCatalogService {
         if (event.status() != EventStatus.DRAFT) {
             throw new BusinessException(ErrorCode.EVENT_NOT_EDITABLE,
                     "Sự kiện đã công bố, không thêm loại vé hoặc ghế được nữa");
+        }
+    }
+
+    /** Các trường đổi giữa hai bản của sự kiện, mỗi trường {@code from}/{@code to}. Mô tả chỉ ghi là có đổi. */
+    private static Map<String, Object> changes(EventRow before, EventRow after) {
+        Map<String, Object> changes = new LinkedHashMap<>();
+        change(changes, "title", before.title(), after.title());
+        change(changes, "venueId", before.venueId(), after.venueId());
+        change(changes, "startsAt", before.startsAt(), after.startsAt());
+        change(changes, "saleOpensAt", before.saleOpensAt(), after.saleOpensAt());
+        change(changes, "saleClosesAt", before.saleClosesAt(), after.saleClosesAt());
+        change(changes, "maxTicketsPerUser", before.maxTicketsPerUser(), after.maxTicketsPerUser());
+        if (!Objects.equals(before.description(), after.description())) {
+            changes.put("description", Map.of("changed", true));
+        }
+        return changes;
+    }
+
+    private static void change(Map<String, Object> changes, String field, Object from, Object to) {
+        if (!Objects.equals(from, to)) {
+            Map<String, Object> diff = new LinkedHashMap<>();
+            diff.put("from", from);
+            diff.put("to", to);
+            changes.put(field, diff);
         }
     }
 

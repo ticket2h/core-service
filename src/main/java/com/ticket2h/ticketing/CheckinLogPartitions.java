@@ -3,13 +3,11 @@ package com.ticket2h.ticketing;
 import java.time.Clock;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
-import java.util.Map;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
+
+import com.ticket2h.common.persistence.MonthlyPartitions;
 
 /**
  * Tạo trước bảng con theo tháng của {@code checkin_logs} (ADR-019). Mỗi tháng (giờ UTC) một bảng
@@ -21,8 +19,6 @@ import org.springframework.stereotype.Component;
 public class CheckinLogPartitions {
 
     static final int MONTHS_AHEAD = 3;
-
-    private static final Logger log = LoggerFactory.getLogger(CheckinLogPartitions.class);
 
     private final NamedParameterJdbcTemplate jdbc;
     private final Clock clock;
@@ -40,33 +36,6 @@ public class CheckinLogPartitions {
 
     /** Bảng con cho mọi tháng từ {@code first} tới {@code last} (tính cả hai đầu). Đã có thì bỏ qua. */
     public int ensure(YearMonth first, YearMonth last) {
-        int created = 0;
-        for (YearMonth month = first; !month.isAfter(last); month = month.plusMonths(1)) {
-            String table = tableName(month);
-            if (exists(table)) {
-                continue;
-            }
-            try {
-                // Tên bảng và mốc thời gian dựng từ YearMonth, không có dữ liệu người dùng: ghép chuỗi an toàn
-                jdbc.getJdbcTemplate().execute("CREATE TABLE " + table + " PARTITION OF checkin_logs FOR VALUES FROM ('"
-                        + month.atDay(1) + "T00:00:00Z') TO ('" + month.plusMonths(1).atDay(1) + "T00:00:00Z')");
-                created++;
-                log.info("Đã tạo bảng con {} cho checkin_logs", table);
-            } catch (DataAccessException e) {
-                // Thường gặp nhất: bảng default đã có dòng của tháng này (job ngừng chạy quá lâu). Xem ADR-019.
-                log.error("Không tạo được bảng con {} của checkin_logs: {}", table,
-                        e.getMostSpecificCause().getMessage());
-            }
-        }
-        return created;
-    }
-
-    static String tableName(YearMonth month) {
-        return "checkin_logs_%04d_%02d".formatted(month.getYear(), month.getMonthValue());
-    }
-
-    private boolean exists(String table) {
-        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT to_regclass(:name) IS NOT NULL",
-                Map.of("name", table), Boolean.class));
+        return MonthlyPartitions.ensure(jdbc, "checkin_logs", first, last);
     }
 }

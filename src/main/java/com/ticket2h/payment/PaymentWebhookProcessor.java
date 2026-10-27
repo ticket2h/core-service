@@ -11,6 +11,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.ticket2h.audit.AuditAction;
+import com.ticket2h.audit.AuditActor;
+import com.ticket2h.audit.AuditEntry;
+import com.ticket2h.audit.AuditLog;
 import com.ticket2h.common.events.OrderPaid;
 import com.ticket2h.common.events.Topics;
 import com.ticket2h.inventory.SeatHoldService;
@@ -29,21 +33,25 @@ import com.ticket2h.reporting.SalesRollup;
 class PaymentWebhookProcessor {
 
     private static final Logger log = LoggerFactory.getLogger(PaymentWebhookProcessor.class);
+    /** Người làm trong lịch sử thao tác (ADR-023): hệ thống xử lý kết quả thanh toán (webhook hoặc đối soát). */
+    static final AuditActor ACTOR = AuditActor.system("payments");
 
     private final PaymentRepository payments;
     private final OrderService orders;
     private final SeatHoldService seatHolds;
     private final OutboxWriter outbox;
     private final SalesRollup salesRollup;
+    private final AuditLog audit;
     private final Clock clock;
 
     PaymentWebhookProcessor(PaymentRepository payments, OrderService orders, SeatHoldService seatHolds,
-            OutboxWriter outbox, SalesRollup salesRollup, Clock clock) {
+            OutboxWriter outbox, SalesRollup salesRollup, AuditLog audit, Clock clock) {
         this.payments = payments;
         this.orders = orders;
         this.seatHolds = seatHolds;
         this.outbox = outbox;
         this.salesRollup = salesRollup;
+        this.audit = audit;
         this.clock = clock;
     }
 
@@ -79,6 +87,11 @@ class PaymentWebhookProcessor {
             log.error("Webhook lệch số tiền: payment {} chờ {} {}, cổng báo {} {}. Cần người kiểm tra.",
                     payment.getId(), payment.getAmount(), payment.getCurrency(), event.amount(), event.currency());
             payment.markAmountMismatch("Cổng báo " + event.amount() + " " + event.currency(), now);
+            audit.record(ACTOR, AuditEntry.of(AuditAction.PAYMENT_AMOUNT_MISMATCH, payment.getId())
+                    .event(order.getEventId()).detail("orderId", order.getId())
+                    .detail("expected", payment.getAmount()).detail("expectedCurrency", payment.getCurrency())
+                    .detail("reported", event.amount()).detail("reportedCurrency", event.currency())
+                    .detail("source", event.eventId()));
             return WebhookOutcome.AMOUNT_MISMATCH;
         }
 
@@ -102,6 +115,7 @@ class PaymentWebhookProcessor {
                 return WebhookOutcome.PAID;
             }
             payment.requestRefund("SEATS_TAKEN", now);
+            recordRefundRequested(payment, order, "SEATS_TAKEN", event);
             log.warn("Payment {} thành công nhưng đơn {} đã mất ghế: chờ hoàn tiền", payment.getId(), order.getId());
             return WebhookOutcome.REFUND_REQUESTED;
         }
@@ -113,9 +127,18 @@ class PaymentWebhookProcessor {
             default -> "ORDER_ALREADY_PAID";
         };
         payment.requestRefund(reason, now);
+        recordRefundRequested(payment, order, reason, event);
         log.warn("Payment {} thành công nhưng đơn {} đang {}: chờ hoàn tiền", payment.getId(), order.getId(),
                 order.getStatus());
         return WebhookOutcome.REFUND_REQUESTED;
+    }
+
+    /** {@code source}: id của webhook, hoặc {@code reconcile:<paymentId>} khi kết quả đến từ đối soát. */
+    private void recordRefundRequested(Payment payment, Order order, String reason, MockPayWebhookEvent event) {
+        audit.record(ACTOR, AuditEntry.of(AuditAction.PAYMENT_REFUND_REQUESTED, payment.getId())
+                .event(order.getEventId()).detail("orderId", order.getId()).detail("reason", reason)
+                .detail("amount", payment.getAmount()).detail("currency", payment.getCurrency())
+                .detail("source", event.eventId()));
     }
 
     private WebhookOutcome failed(MockPayWebhookEvent event) {

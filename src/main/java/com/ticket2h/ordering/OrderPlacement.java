@@ -8,6 +8,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import com.ticket2h.common.persistence.Constraints;
+import com.ticket2h.inventory.SeatGate;
 
 /**
  * Lớp bọc idempotency quanh {@link OrderCreationService}. KHÔNG có {@code @Transactional}: mỗi lần
@@ -22,11 +23,14 @@ public class OrderPlacement {
     private final OrderCreationService creation;
     private final OrderRepository orders;
     private final OrderItemRepository orderItems;
+    private final SeatGate seatGate;
 
-    OrderPlacement(OrderCreationService creation, OrderRepository orders, OrderItemRepository orderItems) {
+    OrderPlacement(OrderCreationService creation, OrderRepository orders, OrderItemRepository orderItems,
+            SeatGate seatGate) {
         this.creation = creation;
         this.orders = orders;
         this.orderItems = orderItems;
+        this.seatGate = seatGate;
     }
 
     public PlacementResult place(UUID userId, String idempotencyKey, CreateOrderRequest request) {
@@ -36,7 +40,12 @@ public class OrderPlacement {
             return replay(existing.get(), hash);
         }
         try {
-            OrderCreationService.CreatedOrder created = creation.create(userId, idempotencyKey, hash, request);
+            // Lớp lọc ghế (ADR-028), mặc định không lọc. Cùng người, cùng key là cùng chủ: request gửi lại không tự
+            // chặn mình mà đi tiếp tới database và nhận lại đơn cũ
+            List<UUID> seatIds = request.items().stream().filter(CreateOrderRequest.Item::hasSeats)
+                    .flatMap(item -> item.seatIds().stream()).toList();
+            OrderCreationService.CreatedOrder created = seatGate.guard(request.eventId(), userId + ":" + idempotencyKey,
+                    seatIds, () -> creation.create(userId, idempotencyKey, hash, request));
             return new PlacementResult(created.order(), created.items(), false);
         } catch (DataIntegrityViolationException e) {
             if (!Constraints.isUniqueViolation(e, IDEMPOTENCY_CONSTRAINT)) {

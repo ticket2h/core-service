@@ -9,13 +9,21 @@ import org.springframework.stereotype.Component;
 class PaymentJobsScheduler {
 
     private final RefundJob refundJob;
+    private final PaymentReconciliation reconciliation;
 
-    PaymentJobsScheduler(RefundJob refundJob) {
+    PaymentJobsScheduler(RefundJob refundJob, PaymentReconciliation reconciliation) {
         this.refundJob = refundJob;
+        this.reconciliation = reconciliation;
     }
 
     @Scheduled(fixedDelay = 10_000, initialDelay = 10_000)
     void refund() {
         refundJob.run();
+    }
+
+    /** Đối soát với cổng (ADR-022): mỗi phút xét các payment đến hạn hỏi lại. */
+    @Scheduled(fixedDelay = 60_000, initialDelay = 30_000)
+    void reconcile() {
+        reconciliation.run();
     }
 }

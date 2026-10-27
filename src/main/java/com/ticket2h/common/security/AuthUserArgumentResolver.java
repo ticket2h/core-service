@@ -1,11 +1,8 @@
 package com.ticket2h.common.security;
 
-import java.util.UUID;
-
 import org.springframework.core.MethodParameter;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.support.WebDataBinderFactory;
 import org.springframework.web.context.request.NativeWebRequest;
@@ -30,9 +27,6 @@ public class AuthUserArgumentResolver implements HandlerMethodArgumentResolver {
         if (!(authentication instanceof JwtAuthenticationToken token)) {
             throw new BusinessException(ErrorCode.UNAUTHENTICATED, "Cần đăng nhập");
         }
-        Jwt jwt = token.getToken();
-        String organizerId = jwt.getClaimAsString(JwtClaims.ORGANIZER_ID);
-        return new AuthUser(UUID.fromString(jwt.getSubject()), Role.valueOf(jwt.getClaimAsString(JwtClaims.ROLE)),
-                organizerId == null ? null : UUID.fromString(organizerId));
+        return AuthUser.from(token.getToken());
     }
 }

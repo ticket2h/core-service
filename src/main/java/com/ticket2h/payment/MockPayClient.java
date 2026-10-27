@@ -3,10 +3,12 @@ package com.ticket2h.payment;
 import java.math.BigDecimal;
 import java.net.http.HttpClient;
 import java.time.Instant;
+import java.util.Optional;
 
 import org.springframework.http.MediaType;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
@@ -53,6 +55,24 @@ public class MockPayClient {
                 .body(RefundResponse.class));
     }
 
+    /**
+     * {@code GET /api/v1/payments/by-ref/{merchantRef}}: trạng thái phiên ở cổng, dùng cho đối soát (ADR-022). Cổng
+     * không có phiên nào với {@code merchantRef} này (tạo phiên lỗi trước khi tới cổng) → rỗng.
+     */
+    public Optional<GatewayPayment> paymentByMerchantRef(String merchantRef) {
+        try {
+            return Optional.of(call("tra trạng thái thanh toán", () -> rest.get()
+                    .uri("/api/v1/payments/by-ref/{merchantRef}", merchantRef)
+                    .retrieve()
+                    .body(GatewayPayment.class)));
+        } catch (MockPayException e) {
+            if (e.getCause() instanceof HttpClientErrorException.NotFound) {
+                return Optional.empty();
+            }
+            throw e;
+        }
+    }
+
     private static <T> T call(String action, java.util.function.Supplier<T> request) {
         T response;
         try {
@@ -76,6 +96,20 @@ public class MockPayClient {
     public record RefundRequest(String gatewayTransactionId, BigDecimal amount, String idempotencyKey) {}
 
     public record RefundResponse(String refundId, String status) {}
+
+    /**
+     * {@code status}: PENDING, SUCCEEDED, FAILED, CANCELLED, EXPIRED. Để dạng chuỗi: cổng thêm trạng thái mới thì core
+     * vẫn đọc được (coi như chưa có kết quả).
+     */
+    public record GatewayPayment(String status, String gatewayPaymentId, String gatewayTransactionId, BigDecimal amount,
+            String currency) {
+
+        static final String PENDING = "PENDING";
+        static final String SUCCEEDED = "SUCCEEDED";
+        static final String FAILED = "FAILED";
+        static final String CANCELLED = "CANCELLED";
+        static final String EXPIRED = "EXPIRED";
+    }
 
     public static class MockPayException extends RuntimeException {
         public MockPayException(String message, Throwable cause) {

@@ -97,6 +97,24 @@ class OrganizerController {
                 request.name(), request.kind(), request.price(), request.quantity()), null);
     }
 
+    /**
+     * Đổi giá loại vé, kể cả khi sự kiện đang bán: đơn đã tạo giữ giá lúc mua, đơn tạo sau dùng giá mới. Được ghi vào
+     * lịch sử thao tác (ADR-023). {@code seatCount} trong response là {@code null}: tải lại chi tiết sự kiện nếu cần.
+     */
+    /** Bật phòng chờ ({@code admitPerSecond} người vào mỗi giây) hoặc tắt ({@code null}), ADR-027. */
+    @PutMapping("/events/{eventId}/waiting-room")
+    EventResponse setWaitingRoom(AuthUser caller, @PathVariable UUID eventId,
+            @Valid @RequestBody WaitingRoomRequest request) {
+        return EventResponse.of(catalog.setWaitingRoom(catalog.organizerOf(caller), eventId, request.admitPerSecond()));
+    }
+
+    @PutMapping("/events/{eventId}/ticket-types/{ticketTypeId}/price")
+    TicketTypeResponse changePrice(AuthUser caller, @PathVariable UUID eventId, @PathVariable UUID ticketTypeId,
+            @Valid @RequestBody PriceRequest request) {
+        return TicketTypeResponse.of(catalog.changeTicketTypePrice(catalog.organizerOf(caller), eventId, ticketTypeId,
+                request.price()), null);
+    }
+
     @PostMapping("/events/{eventId}/seats")
     @ResponseStatus(HttpStatus.CREATED)
     SeatsCreatedResponse addSeats(AuthUser caller, @PathVariable UUID eventId,
@@ -168,11 +186,14 @@ class OrganizerController {
         }
     }
 
+    /** {@code waitingRoomAdmitPerSecond}: {@code null} là không có phòng chờ. */
     record EventResponse(UUID id, UUID venueId, String title, String description, String timeZone,
-            Instant startsAt, Instant saleOpensAt, Instant saleClosesAt, int maxTicketsPerUser, EventStatus status) {
+            Instant startsAt, Instant saleOpensAt, Instant saleClosesAt, int maxTicketsPerUser, EventStatus status,
+            Integer waitingRoomAdmitPerSecond) {
         static EventResponse of(EventRow e) {
             return new EventResponse(e.id(), e.venueId(), e.title(), e.description(), e.timeZone().getId(),
-                    e.startsAt(), e.saleOpensAt(), e.saleClosesAt(), e.maxTicketsPerUser(), e.status());
+                    e.startsAt(), e.saleOpensAt(), e.saleClosesAt(), e.maxTicketsPerUser(), e.status(),
+                    e.waitingRoomAdmitPerSecond());
         }
     }
 
@@ -188,6 +209,10 @@ class OrganizerController {
     record TicketTypeRequest(@NotBlank @Size(max = 100) String name, @NotNull TicketKind kind,
             @NotNull @DecimalMin("0") @Digits(integer = 12, fraction = 2) BigDecimal price,
             @Min(1) @Max(1_000_000) Integer quantity) {}
+
+    record WaitingRoomRequest(@Min(1) @Max(OrganizerCatalogService.MAX_ADMIT_PER_SECOND) Integer admitPerSecond) {}
+
+    record PriceRequest(@NotNull @DecimalMin("0") @Digits(integer = 12, fraction = 2) BigDecimal price) {}
 
     record TicketTypeResponse(UUID id, String name, TicketKind kind, BigDecimal price, Integer totalQuantity,
             Integer availableQuantity, Integer seatCount) {

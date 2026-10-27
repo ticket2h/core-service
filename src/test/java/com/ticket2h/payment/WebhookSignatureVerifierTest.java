@@ -87,6 +87,6 @@ class WebhookSignatureVerifierTest {
         var mockPay = new Ticket2hProperties.MockPay(URI.create("http://localhost"), "key", secret, "r", "n",
                 Duration.ofSeconds(1), Duration.ofSeconds(1));
         return new Ticket2hProperties(null, null, new Ticket2hProperties.Payment(mockPay), null, null, null, null, null,
-                null);
+                null, null, null, null, null, null);
     }
 }

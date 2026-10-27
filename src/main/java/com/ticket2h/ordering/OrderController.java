@@ -20,29 +20,40 @@ import com.ticket2h.common.error.BusinessException;
 import com.ticket2h.common.error.ErrorCode;
 import com.ticket2h.common.error.NotFoundException;
 import com.ticket2h.common.error.ValidationException;
+import com.ticket2h.common.ratelimit.RateLimited;
 import com.ticket2h.common.security.AuthUser;
+import com.ticket2h.waitingroom.WaitingRoom;
 
 @RestController
 class OrderController {
 
     static final String IDEMPOTENCY_KEY = "Idempotency-Key";
     static final String REPLAYED = "Idempotent-Replayed";
+    static final String ADMISSION_TOKEN = "Admission-Token";
     private static final int MAX_KEY_LENGTH = 64;
 
     private final OrderPlacement placement;
     private final OrderService orders;
     private final OrderCancellation cancellation;
+    private final WaitingRoom waitingRoom;
 
-    OrderController(OrderPlacement placement, OrderService orders, OrderCancellation cancellation) {
+    OrderController(OrderPlacement placement, OrderService orders, OrderCancellation cancellation,
+            WaitingRoom waitingRoom) {
         this.placement = placement;
         this.orders = orders;
         this.cancellation = cancellation;
+        this.waitingRoom = waitingRoom;
     }
 
-    /** Lần đầu 201. Gửi lại cùng key và cùng nội dung: 200, cùng body, header Idempotent-Replayed: true. */
+    /**
+     * Lần đầu 201. Gửi lại cùng key và cùng nội dung: 200, cùng body, header Idempotent-Replayed: true.
+     * Sự kiện có phòng chờ (ADR-027): cần header {@value #ADMISSION_TOKEN} lấy từ phòng chờ, không có thì 403.
+     */
     @PostMapping("/orders")
+    @RateLimited(RateLimited.Policy.ORDERS)
     ResponseEntity<OrderResponse> create(AuthUser caller,
             @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String idempotencyKey,
+            @RequestHeader(value = ADMISSION_TOKEN, required = false) String admissionToken,
             @Valid @RequestBody CreateOrderRequest request) {
         if (idempotencyKey == null || idempotencyKey.isBlank()) {
             throw new BusinessException(ErrorCode.IDEMPOTENCY_KEY_MISSING, "Cần header Idempotency-Key cho mỗi lần mua");
@@ -50,6 +61,7 @@ class OrderController {
         if (idempotencyKey.length() > MAX_KEY_LENGTH) {
             throw new ValidationException("Idempotency-Key tối đa " + MAX_KEY_LENGTH + " ký tự");
         }
+        waitingRoom.checkAdmission(caller.id(), request.eventId(), admissionToken);
         OrderPlacement.PlacementResult result = placement.place(caller.id(), idempotencyKey, request);
         OrderResponse body = OrderResponse.of(result.order(), result.items());
         if (result.replayed()) {

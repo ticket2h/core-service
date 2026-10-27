@@ -14,6 +14,10 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.ticket2h.audit.AuditAction;
+import com.ticket2h.audit.AuditActor;
+import com.ticket2h.audit.AuditEntry;
+import com.ticket2h.audit.AuditLog;
 import com.ticket2h.common.time.Times;
 
 /** Các transaction ngắn của job hoàn tiền. Lời gọi MockPay nằm giữa, ngoài transaction. */
@@ -29,13 +33,17 @@ class RefundSteps {
             Duration.ofMinutes(1), Duration.ofMinutes(2), Duration.ofMinutes(5),
             Duration.ofMinutes(10), Duration.ofMinutes(30), Duration.ofHours(1));
 
+    private static final AuditActor ACTOR = AuditActor.system("refund-job");
+
     private final NamedParameterJdbcTemplate jdbc;
     private final PaymentRepository payments;
+    private final AuditLog audit;
     private final Clock clock;
 
-    RefundSteps(NamedParameterJdbcTemplate jdbc, PaymentRepository payments, Clock clock) {
+    RefundSteps(NamedParameterJdbcTemplate jdbc, PaymentRepository payments, AuditLog audit, Clock clock) {
         this.jdbc = jdbc;
         this.payments = payments;
+        this.audit = audit;
         this.clock = clock;
     }
 
@@ -69,6 +77,9 @@ class RefundSteps {
         Payment payment = payments.lockById(paymentId).orElseThrow();
         if (payment.getStatus() == PaymentStatus.REFUND_PENDING) {
             payment.markRefunded(clock.instant());
+            audit.record(ACTOR, AuditEntry.of(AuditAction.PAYMENT_REFUNDED, paymentId)
+                    .detail("orderId", payment.getOrderId()).detail("reason", payment.getRefundReason())
+                    .detail("amount", payment.getAmount()).detail("currency", payment.getCurrency()));
         }
     }
 

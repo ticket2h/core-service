@@ -39,9 +39,11 @@ rút gọn (`...`) để dễ đọc; mở file thật để xem đầy đủ.
 10. [M2: thanh toán, webhook, hoàn tiền](#10-m2-thanh-toán-webhook-hoàn-tiền)
 11. [M3: outbox, Kafka, vé, QR, email, check-in, chuyển nhượng](#11-m3-outbox-kafka-vé-qr-email-check-in-chuyển-nhượng)
 12. [M4: dữ liệu lớn](#12-m4-dữ-liệu-lớn)
-13. [Test](#13-test)
-14. [Bài tập thực hành và câu hỏi tự kiểm tra](#14-bài-tập-thực-hành-và-câu-hỏi-tự-kiểm-tra)
-15. [Thuật ngữ](#15-thuật-ngữ)
+13. [M5: thời gian thực và giờ mở bán](#13-m5-thời-gian-thực-và-giờ-mở-bán)
+14. [M6: đối soát thanh toán, lịch sử thao tác](#14-m6-đối-soát-thanh-toán-lịch-sử-thao-tác)
+15. [Test](#15-test)
+16. [Bài tập thực hành và câu hỏi tự kiểm tra](#16-bài-tập-thực-hành-và-câu-hỏi-tự-kiểm-tra)
+17. [Thuật ngữ](#17-thuật-ngữ)
 
 ---
 
@@ -1847,9 +1849,209 @@ bảng mới, chép dữ liệu, chỉnh lại sequence, xoá bảng cũ, tất 
 
 ---
 
-## 13. Test
+## 13. M5: thời gian thực và giờ mở bán
 
-### 13.1. Hai loại test
+M4 hỏi "dữ liệu lớn thì còn nhanh không". M5 hỏi "20:00 mở bán, hàng nghìn người bấm cùng một giây thì sao", và
+"người khác vừa giữ ghế thì mình có thấy ngay không". Lộ trình đặt hai tiêu chí:
+
+| Tiêu chí | Ở đâu | Kỹ thuật chính | Mục |
+|---|---|---|---|
+| Ghế đổi trạng thái hiện ở máy khác dưới 1 giây, kể cả khi hai máy nối vào hai instance khác nhau | `SeatMapLiveIT` | SSE, Redis pub/sub, số phiên bản của ghế | 13.2 |
+| Load test giờ mở bán: không bán trùng, không 5xx, p95 đạt mục tiêu | `../infra/scripts/loadtest.sh` (k6) | Phòng chờ, giới hạn request, cache, hai instance | 13.3–13.7 |
+
+Lần đầu tiên hệ thống có Redis. Quy tắc xuyên suốt: **Redis chỉ giữ thứ mất được**. Đơn, vé, tiền, trạng thái ghế
+vẫn chỉ nằm trong PostgreSQL; Redis sập thì bán vé vẫn chạy (chậm hơn, ít tiện hơn), không sai.
+
+### 13.1. Redis trong 5 phút
+
+Redis là một server giữ dữ liệu trong RAM, mỗi khoá một giá trị. M5 dùng năm thứ:
+
+| Thứ | Lệnh | Dùng ở |
+|---|---|---|
+| Chuỗi, số đếm | `GET`, `SET key value NX PX 5000` (chỉ đặt nếu chưa có, hết hạn sau 5 giây), `INCR` | Số thứ tự sơ đồ ghế, khoá "giây này đã có instance cho người vào" |
+| Hash | `HSET`, `HMGET` | Xô token của giới hạn request (`tokens`, `at`) |
+| Sorted set (tập có điểm, luôn sắp theo điểm) | `ZADD`, `ZRANK` (vị trí), `ZPOPMIN n` (lấy n phần tử điểm nhỏ nhất), `ZRANGEBYSCORE` | Hàng chờ của phòng chờ |
+| Pub/sub | `PUBLISH kênh tin`, `PSUBSCRIBE mẫu*` | Phát thay đổi ghế tới mọi instance |
+| Script Lua | `EVAL` | Mọi thao tác nhiều bước |
+
+Điều quan trọng nhất: **Redis chạy từng lệnh một, và chạy cả một script Lua như một lệnh**. Đọc, tính, ghi trong một
+script thì không instance nào chen vào giữa được. Đây là cách M5 tránh race condition mà không cần khoá:
+
+```lua
+-- SeatChangeBus.PUBLISH: tăng số thứ tự và phát trong cùng một bước
+local seq = redis.call('INCR', KEYS[1])
+redis.call('PUBLISH', KEYS[2], seq .. '|' .. ARGV[1])
+return seq
+```
+
+Trong Java, script là một `RedisScript<Long>` gọi qua `StringRedisTemplate.execute(script, keys, args...)`. Khoá đặt
+tên có tiền tố `t2h:` và phần `{eventId}` trong ngoặc nhọn (hash tag): nếu sau này chạy Redis Cluster, mọi khoá của
+một sự kiện nằm cùng một node, script mới chạm được tất cả.
+
+Thử tay: `docker compose exec redis redis-cli`, rồi `PSUBSCRIBE 't2h:seatmap:changes:*'` và giữ một ghế trên web.
+
+### 13.2. Sơ đồ ghế trực tiếp (`inventory/SeatChange*`, `SeatMapHub`, ADR-024)
+
+Đường đi của một thay đổi:
+
+```
+POST /orders (instance A)
+  └─ SeatHoldService.hold: UPDATE seats ... version = version + 1 RETURNING id, section, status, version
+       └─ SeatChangeRecorder: gom các ghế đổi, đăng ký "sau khi commit" (TransactionSynchronization)
+            └─ commit xong → SeatChangeBus.publish: bỏ vào hàng đợi, luồng request đi tiếp, không chờ Redis
+                 └─ luồng phát: script Lua INCR + PUBLISH ─► Redis ─► mọi instance (A, B...) đang PSUBSCRIBE
+                                                                     └─ SeatMapHub.accept: gom theo sự kiện
+                                                                          └─ mỗi 300 ms: một event "seats" cho mỗi trình duyệt (SSE)
+```
+
+Bốn câu hỏi và cách code trả lời:
+
+1. **Vì sao phát SAU commit?** Phát trong transaction mà transaction rollback (ghế thứ hai đã có người) thì trình duyệt
+   thấy một thay đổi chưa từng xảy ra. `TransactionSynchronization.afterCommit` chỉ chạy khi commit thành công.
+2. **Vì sao SSE mà không WebSocket?** Sơ đồ ghế chỉ cần một chiều (server → trình duyệt). SSE là HTTP thường:
+   `SseEmitter` của Spring MVC, `EventSource` của trình duyệt tự nối lại khi mất mạng, nginx chỉ cần không gom bộ đệm
+   (core gửi header `X-Accel-Buffering: no`). WebSocket đáng dùng khi cần hai chiều (chat, game).
+3. **Hai instance phát lệch thứ tự thì sao?** A giữ ghế X, B trả ghế X; luồng phát của A chậm hơn một chút thì trình
+   duyệt nhận "trống" rồi "đã giữ". Số thứ tự chung không cứu được (nó là thứ tự phát, không phải thứ tự commit). Cách
+   giải là `seats.version` tăng ngay trong câu UPDATE: trình duyệt chỉ áp thay đổi có version lớn hơn cái đang có
+   (`web-app/src/features/events/liveSeats.ts`), nhận lẫn thứ tự vẫn đúng.
+4. **Mất mạng rồi nối lại thì sao?** Trình duyệt mở luồng trước, nhận `hello {seq}`, rồi tải ảnh chụp `/seats`. Ảnh
+   chụp mang header `Seat-Map-Seq`, đọc **trước** khi đọc database: thay đổi số k chỉ được phát sau khi commit, nên mọi
+   thay đổi có số ≤ `Seat-Map-Seq` đã nằm trong ảnh chụp. Ảnh chụp cũ hơn `hello` thì tải lại. Nối lại sau khi mất
+   mạng là một `hello` mới, tức là lại tải đủ. Instance lỡ message (Redis mất kết nối) thấy số nhảy cóc và gửi `resync`.
+
+Đọc `SeatMapLiveIT.viewer_on_one_instance_sees_changes_made_on_another`: test **khởi động thêm một app core thật**
+(`SpringApplicationBuilder`, cổng ngẫu nhiên, cùng PostgreSQL/Kafka/Redis của test) để chứng minh tiêu chí hai instance.
+
+### 13.3. Cache làm mới ở nền (`common/cache/`, ADR-025)
+
+Trang sự kiện và sơ đồ ghế giống nhau cho mọi người và cũ vài giây không sao (đặt vé luôn kiểm tra lại trong
+database). Từ khoá của lộ trình là `@Cacheable(sync = true)`: lúc hết hạn chỉ một request tải lại, các request khác
+**chờ** kết quả đó. Chặn được việc 10.000 request cùng đổ vào database, nhưng mỗi lần hết hạn mọi người đều chờ.
+
+`RefreshAheadCache` dùng `refreshAfterWrite` của Caffeine: quá hạn thì request kế tiếp vẫn nhận ngay bản cũ, Caffeine
+tải bản mới trên luồng nền. Chỉ lần đầu tiên mới phải chờ.
+
+Bài học đo được ở M5: bản đầu đặt `@Cacheable` và `@Transactional` trên cùng một method. Hai annotation là hai lớp
+proxy (AOP), không khai báo thứ tự thì transaction có thể chạy trước cache: **request trúng cache vẫn mượn một kết nối
+database** để mở transaction rồi đóng. Lúc mở bán, kết nối bận vì các đơn đang chờ khoá ghế, và trang sự kiện vốn đã
+có trong bộ nhớ cũng chậm theo. Muốn dùng hai annotation cùng nhau thì đặt `@EnableCaching(order = ...)` nhỏ hơn thứ
+tự của transaction, hoặc như ở đây: phần đọc công khai không cần transaction.
+
+### 13.4. Giới hạn request (`common/ratelimit/`, ADR-026 ở infra)
+
+Token bucket: mỗi khoá (một IP, một người dùng) có một xô chứa tối đa `capacity` lượt, tự đầy lại `refillPerSecond`
+lượt mỗi giây; mỗi request lấy một lượt, hết lượt thì 429. Cho phép dồn một lúc (mở trang gọi 5 API cùng lúc) nhưng
+giới hạn trung bình. Toàn bộ phép tính nằm trong một script Lua (`RateLimiter.TOKEN_BUCKET`), giờ lấy bằng lệnh `TIME`
+của Redis: nhiều instance cùng trừ một xô không đếm sai, giờ của từng máy lệch nhau cũng không sao.
+
+`RateLimitInterceptor` là một `HandlerInterceptor`: chạy sau Spring Security (đã biết người gọi), trước controller.
+Endpoint có `@RateLimited(ORDERS)` bị giới hạn thêm theo người dùng. IP thật lấy từ `X-Forwarded-For`; gateway nginx
+**ghi đè** header này (không nối thêm), không thì bot đổi IP chỉ bằng cách tự gửi header khác.
+
+### 13.5. Phòng chờ (`waitingroom/`, ADR-027)
+
+Load test (13.7) cho thấy: cho 2.000 người đặt vé cùng một giây thì máy chủ không kịp. Phòng chờ biến "2.000 người
+trong một giây" thành "200 người mỗi giây":
+
+1. Vào hàng: script Lua `ZADD` người này vào sorted set `queue` (đã có thì giữ chỗ cũ). Đến trước giờ mở bán thì điểm
+   là số ngẫu nhiên trong [0, 1), đến sau thì là số tăng dần: người đến sớm đứng trước và được xếp ngẫu nhiên, bấm F5
+   lúc 19:59:59 không có lợi. Vị trí là `ZRANK + 1`.
+2. Mỗi giây, job ở **mọi** instance chạy script `ADMIT`: `SET NX` khoá của giây đó (instance thứ hai dừng ngay), bỏ
+   người đã quá 1 phút không hỏi thứ tự, `ZPOPMIN` N người vào tập `admitted`.
+3. Người được vào nhận vé vào cửa `v1.<sự kiện>.<người>.<hạn>.<HMAC-SHA256>`. `POST /orders` kiểm tra chữ ký trong bộ
+   nhớ (`AdmissionTokens.verify`, so sánh bằng `MessageDigest.isEqual` để không lộ chữ ký qua thời gian so sánh):
+   không thêm lần gọi Redis nào vào lúc đông nhất, và Redis sập thì người đã được vào vẫn mua được.
+
+Đọc `WaitingRoomIT.n_people_per_second_even_when_every_instance_runs_the_job` và
+`people_arriving_before_the_sale_opens_are_shuffled_and_stay_ahead_of_later_arrivals`.
+
+### 13.6. Redis sập thì sao (`common/redis/RedisBreaker`)
+
+| Tính năng | Redis sập thì | Vì sao an toàn |
+|---|---|---|
+| Sơ đồ ghế trực tiếp | Web quay về tải lại 15 giây một lần | Ảnh chụp đọc từ database |
+| Cache | Không ảnh hưởng | Cache nằm trong bộ nhớ từng instance |
+| Giới hạn request | Tạm không giới hạn | Lớp bảo vệ thêm, không phải lớp quyết định |
+| Phòng chờ | Không vào hàng được (503); người đã có vé vào cửa vẫn mua | Vé vào cửa kiểm tra bằng chữ ký |
+| Lớp lọc ghế (bản thử) | Vào thẳng database | Database luôn quyết định (ADR-028) |
+
+Cái bẫy: Redis không trả lời thì mỗi lệnh chờ hết timeout (0,5 giây). Mỗi request gọi Redis hai lần (giới hạn theo IP,
+theo người dùng) thì **mọi request chậm thêm 1 giây**, tức là Redis sập kéo theo cả hệ thống. `RedisBreaker` là một
+cầu dao nhỏ: lỗi một lần thì 5 giây sau không gọi Redis nữa, trả ngay giá trị dự phòng; hết 5 giây thử lại một lần.
+`SeatMapLiveIT.selling_goes_on_while_redis_does_not_answer` tạm dừng container Redis (`docker pause`) để kiểm tra.
+
+### 13.7. Hai instance và load test (`../infra/loadtest/`, ADR-029)
+
+Trong compose, mọi instance core có thêm tên chung `core`; gateway gọi `core` và DNS của Docker trả địa chỉ của tất
+cả. Instance nào cũng như nhau vì mọi trạng thái chung nằm ở PostgreSQL và Redis: job nền nhận việc bằng
+`SKIP LOCKED`, job phòng chờ dùng khoá theo giây, thay đổi ghế đi qua pub/sub.
+
+`scripts/loadtest.sh` chạy k6 (công cụ load test viết kịch bản bằng JavaScript) trong Docker: 2.000 người dùng ảo đăng
+ký, đăng nhập, mở trang trước giờ mở bán, rồi cùng đặt 2 ghế lúc mở bán; sau đó `verify.sql` kiểm tra không ghế nào
+bán trùng. Mỗi instance core bị giới hạn 2 CPU (như máy chủ thật), và kịch bản có một pha khởi động cho JVM "nóng".
+Số đo đầy đủ ở ADR-029; các bài học:
+
+- **Đo trước, đừng đoán chỗ nghẽn.** Giả thuyết ban đầu là database (khoá dòng trên mấy hàng ghế đầu). `docker stats`
+  trong lúc đo cho thấy core dùng hết 2 CPU, PostgreSQL rảnh. Vì vậy lớp lọc Redis (ADR-028), dù nhanh gấp 3,5 lần khi
+  đo riêng phần giữ ghế, không giúp gì cho cả hệ thống.
+- **Một máy làm mọi việc thì số đo sai.** Không giới hạn CPU, k6 tự ăn 7 lõi và mọi container tranh nhau CPU; trang
+  trúng cache cũng chậm 2 giây, kết luận nào cũng sai.
+- **JVM mới khởi động chậm hơn nhiều** (JIT chưa biên dịch): đợt mở bán đánh vào JVM lạnh có nhiều 504 hơn hẳn.
+- **Thêm instance không thay được kiểm soát lượng vào.** Hai instance hết lỗi 5xx nhưng p95 của đặt vé vẫn 1–6 giây;
+  phòng chờ 100 người mỗi giây đưa p95 xuống 12 ms (người cuối hàng chờ khoảng 20 giây rồi đặt ngay).
+- **Chính phòng chờ cũng có thể tạo tải**: 2.000 người hỏi thứ tự mỗi 2 giây, mỗi lần hỏi đọc database, là 1.000 câu
+  SELECT mỗi giây. Cache sự kiện và hỏi thưa hơn khi còn xa lượt mới làm phòng chờ nhẹ đúng như mục đích.
+
+### 13.8. Tóm tắt
+
+| Vấn đề | Đừng | Làm |
+|---|---|---|
+| Thay đổi tới trình duyệt khác | Tải lại định kỳ; phát trong transaction | SSE, phát sau commit, gom theo lô, version từng bản ghi |
+| Nhiều instance | Giữ trạng thái chung trong bộ nhớ một instance | PostgreSQL/Redis, pub/sub, khoá theo giây, `SKIP LOCKED` |
+| Trang đông người đọc | `@Cacheable(sync)` hết hạn đồng loạt; cache cùng transaction | Cache trong bộ nhớ, làm mới ở nền |
+| Bot, người bấm liên tục | Đếm trong bộ nhớ từng instance; tin `X-Forwarded-For` do client gửi | Token bucket bằng Lua trên Redis; gateway ghi đè header |
+| Đông hơn sức chứa | Cho tất cả vào rồi hy vọng | Phòng chờ, vé vào cửa ký HMAC |
+| Phụ thuộc thêm một hạ tầng | Để nó sập kéo theo cả hệ thống | Giá trị dự phòng và cầu dao, database vẫn quyết định |
+| Hiệu năng | Đoán chỗ nghẽn | Load test có giới hạn CPU, JVM nóng, `docker stats` lúc đo |
+
+---
+
+## 14. M6: đối soát thanh toán, lịch sử thao tác
+
+M6 là "vận hành": giữ hệ thống đúng khi có sự cố và để lại dấu vết. Hai phần đã làm:
+
+### 14.1. Đối soát thanh toán (`payment/PaymentReconciliation*`, ADR-022)
+
+Đơn chỉ thành PAID khi webhook đến. Webhook có thể không bao giờ đến (MockPay `dropWebhook`): khách đã trả tiền, đơn
+hết hạn, ghế về tay người khác. Job đối soát chạy mỗi phút, hỏi cổng `GET /api/v1/payments/by-ref/{paymentId}` cho
+payment chưa có kết quả sau 2 phút, hỏi lại thưa dần (2, 3, 5, 10, 30 phút, 1, 3, 6, 12 giờ, rồi mỗi ngày).
+
+- **Nhận việc**: `UPDATE payments SET next_reconcile_at = now + 2 phút WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)
+  RETURNING id`. Hai instance không nhận trùng; app sập giữa chừng thì 2 phút sau payment được nhận lại (lease).
+- **Xử lý bằng đúng đường của webhook**: cổng báo đã trả thì dựng một event `payment.succeeded` và gọi
+  `PaymentWebhookProcessor.process`. Cùng thứ tự khoá, cùng chống trùng, cùng chính sách đơn hết hạn thì hoàn tiền.
+  Webhook thật đến cùng lúc thì một bên ghi nhận, bên kia nhận `DUPLICATE`.
+- **Bẫy của Hibernate**: entity `Payment` có cột `next_reconcile_at` mà JDBC cũng ghi. Hibernate cập nhật cả dòng mỗi
+  lần flush, nên ghi đè giá trị JDBC vừa đặt. `@Column(updatable = false)`: entity chỉ ghi cột này lúc tạo.
+
+### 14.2. Lịch sử thao tác (`audit/`, ADR-023 ở infra)
+
+Ai đổi giá vé, ai tải danh sách khách có email, hệ thống hoàn tiền đơn nào. Mỗi service một bảng `audit_logs`.
+
+- `AuditLog.record` có `@Transactional(propagation = MANDATORY)`: bắt buộc chạy trong transaction của thay đổi, nên
+  thay đổi rollback thì dòng lịch sử cũng mất. Tải file CSV không có transaction: `recordNow` (`REQUIRES_NEW`).
+- Người làm lấy từ `SecurityContextHolder` (giống `AuditorAware` của Spring Data): JWT thì là người dùng, không có thì
+  là `SYSTEM` kèm tên job.
+- **Chỉ ghi thêm**: trigger `BEFORE UPDATE OR DELETE` ném lỗi. Bỏ dữ liệu cũ là `DROP` một bảng con theo tháng (như
+  `checkin_logs`, dùng chung `MonthlyPartitions`).
+- `details` không chứa email, token: lịch sử giữ lâu và nhiều người xem; trang quản trị tra email theo id lúc hiển thị.
+
+---
+
+## 15. Test
+
+### 15.1. Hai loại test
 
 | | Unit test (`*Test`) | Integration test (`*IT`) |
 |---|---|---|
@@ -1858,7 +2060,7 @@ bảng mới, chép dữ liệu, chỉnh lại sequence, xoá bảng cũ, tất 
 | Ví dụ | `QrTokenCodecTest`, `OrderStatusTest`, `VietnameseTextTest` | `SeatClaimConcurrencyIT`, `PaymentWebhookIT` |
 | Lệnh | `./mvnw test` | `./mvnw verify` |
 
-### 13.2. JUnit 5 và AssertJ
+### 15.2. JUnit 5 và AssertJ
 
 ```java
 class RequestHashTest {
@@ -1877,7 +2079,7 @@ class RequestHashTest {
 - `assertThatThrownBy(() -> ...).isInstanceOf(SoldOutException.class)` kiểm tra code ném đúng exception.
 - Tên test viết như một câu mô tả hành vi: đọc danh sách tên test là biết hệ thống làm gì.
 
-### 13.3. Hạ tầng test (`src/test/java/com/ticket2h/support/`)
+### 15.3. Hạ tầng test (`src/test/java/com/ticket2h/support/`)
 
 | Class | Vai trò |
 |---|---|
@@ -1902,7 +2104,7 @@ hợp đồng với notification-service ([infra/docs/contracts.md](https://gith
 dữ liệu sau mỗi test. Nhưng khi đó mọi thao tác chạy trong transaction của luồng test, các luồng khác **không thấy**
 dữ liệu chưa commit, và test đồng thời trở nên vô nghĩa. Nên ở đây dữ liệu được dọn bằng `TRUNCATE` trước mỗi test.
 
-### 13.4. Đọc một test đồng thời
+### 15.4. Đọc một test đồng thời
 
 `acceptance/SeatClaimConcurrencyIT.java`:
 
@@ -1939,7 +2141,7 @@ void only_one_of_200_concurrent_buyers_gets_the_same_seat() throws Exception {
 `Concurrency.run` dùng hai `CountDownLatch`: `ready` chờ đủ luồng sẵn sàng, `start` thả tất cả cùng lúc. Không có
 nó, luồng đầu tiên có thể chạy xong trước khi luồng cuối kịp khởi động, và test không còn "đồng thời".
 
-### 13.5. Test việc chạy bất đồng bộ
+### 15.5. Test việc chạy bất đồng bộ
 
 Phát vé đi qua Kafka nên không xảy ra ngay. Dùng **Awaitility** để chờ có giới hạn:
 
@@ -1951,13 +2153,13 @@ await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
 Không dùng `Thread.sleep(10000)`: chờ cố định thì vừa chậm (luôn chờ đủ 10 giây) vừa dễ đỏ (máy chậm hơn thì 10
 giây không đủ).
 
-### 13.6. Package `acceptance`
+### 15.6. Package `acceptance`
 
 Các test quan trọng nhất (đồng thời, webhook, QR, check-in, chuyển nhượng, app sập, và bốn tiêu chí M4 ở mục 12) nằm
 trong `src/test/java/com/ticket2h/acceptance/`. Quy tắc trong `CLAUDE.md`: **test đỏ thì sửa code, không sửa test**.
 Một agent AI (hoặc chính bạn khi vội) rất dễ "sửa" test cho xanh thay vì sửa lỗi thật.
 
-### 13.7. Chạy và debug test trong IntelliJ
+### 15.7. Chạy và debug test trong IntelliJ
 
 - Bấm ▶ cạnh tên class hoặc tên method test.
 - Đặt breakpoint trong code app (ví dụ trong `SeatHoldService.hold`), bấm 🐞 cạnh test: app dừng đúng chỗ đó
@@ -1966,7 +2168,7 @@ Một agent AI (hoặc chính bạn khi vội) rất dễ "sửa" test cho xanh 
 
 ---
 
-## 14. Bài tập thực hành và câu hỏi tự kiểm tra
+## 16. Bài tập thực hành và câu hỏi tự kiểm tra
 
 **Trước khi làm bài tập cấp 2 trở lên:** commit code hiện tại (`git add . && git commit -m "M1-M3"`) để luôn quay lại
 được bằng `git restore <file>` hoặc `git stash`.
@@ -2074,7 +2276,7 @@ Trả lời không nhìn code. Nhiều câu là câu phỏng vấn backend phổ
 
 ---
 
-## 15. Thuật ngữ
+## 17. Thuật ngữ
 
 | Thuật ngữ | Nghĩa ngắn gọn |
 |---|---|

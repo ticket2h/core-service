@@ -3,7 +3,7 @@
 Lõi bán vé của Ticket2h: sự kiện, giữ ghế, đơn hàng, thanh toán, vé, check-in, chuyển nhượng. Tài khoản và JWT ở
 `../identity-service`; core chỉ kiểm tra JWT (RS256, JWKS) và tra tài khoản (theo email, theo lô id) qua API nội bộ
 của identity. Giao diện web ở `../web-app`; MockPay chuyển trình duyệt về `/payments/return` của web (kèm `orderId`).
-Spring Boot 4, Java 25, PostgreSQL, Kafka. Một trong các repo của hệ thống (cạnh `../infra`, `../notification-service`,
+Spring Boot 4, Java 25, PostgreSQL, Kafka, Redis (M5). Một trong các repo của hệ thống (cạnh `../infra`, `../notification-service`,
 `../mock-payment-gateway`, `../identity-service`); kiến trúc và hợp đồng giữa các service: `../infra/docs/`.
 Hướng dẫn gốc (thời còn tên TicketRush): `../../ticketrush-m2-m3-huong-dan.md` (M2–M3), `../../lo-trinh-backend-java.md` (lộ trình, M1, M4).
 
@@ -53,6 +53,17 @@ Hướng dẫn gốc (thời còn tên TicketRush): `../../ticketrush-m2-m3-huon
 - `SecurityConfig` chỉ bật khi app chạy web (`@ConditionalOnWebApplication`): profile `datagen` chạy không có web.
 - Thêm bảng hoặc cột NOT NULL mới: sửa cả công cụ sinh dữ liệu (`dev/datagen/CoreDataGenerator`) và chạy
   `CoreDataGeneratorIT`. Id của khách/ban tổ chức/nhân viên sinh ra là hợp đồng với identity (`DatagenIds`).
+- M6, lịch sử thao tác (ADR-023 ở `../infra/docs/adr/`): thao tác nhạy cảm mới của ban tổ chức/admin hay việc hệ
+  thống tự làm với tiền phải gọi `AuditLog.record` trong cùng transaction (tải file: `recordNow`), thêm hằng vào
+  `AuditAction` và nhãn ở `../web-app/src/features/admin/audit.ts`. `details` không chứa email, token, khoá.
+- M5, đổi trạng thái ghế: mọi câu UPDATE `seats` đổi `status` phải tăng `version` và đi qua `SeatHoldService.changed`
+  (báo sơ đồ ghế trực tiếp sau commit). Sửa thẳng `seats` ở chỗ khác thì trình duyệt không thấy thay đổi.
+- M5, Redis chỉ giữ thứ mất được (hàng chờ, xô giới hạn request, số thứ tự, khoá lọc ghế). Database luôn là nơi quyết
+  định. Lần gọi Redis trên đường đi của request phải qua `RedisBreaker` (Redis sập không làm chậm mọi request) và có
+  giá trị dự phòng; chỉ phòng chờ báo lỗi 503 khi Redis sập.
+- M5, cache: dùng `Caches` (`RefreshAheadCache`, làm mới ở nền), không `@Cacheable`: hết hạn đồng loạt làm mọi
+  request chờ tải lại (ADR-025). Chỉ cache dữ liệu công khai, cũ vài giây không sao; không cache trong luồng đặt vé.
+- M5, endpoint mới mà bot có thể lạm dụng: thêm `@RateLimited` (ADR-026).
 
 ## Cấm
 - Không sửa hoặc xoá test trong `src/test/**/acceptance/` nếu chưa hỏi. Test đỏ thì sửa code, không sửa test.
@@ -61,9 +72,9 @@ Hướng dẫn gốc (thời còn tên TicketRush): `../../ticketrush-m2-m3-huon
 
 ## Cấu trúc
 Package theo nghiệp vụ dưới `com.ticket2h`: common, identity, catalog, inventory, ordering, payment, outbox, ticketing,
-reporting, dev.
+reporting, audit, waitingroom, dev.
 Module không gọi repository của module khác; gọi qua service public của module đó (`CatalogQueries`, `UserDirectory`, `OrderService`, `TicketQueries`...).
 API cho service khác: `InternalTicketController` (`/internal/**`, xác thực bằng `InternalApiKeyFilter`). Gọi identity: `identity/IdentityClient` (qua `UserDirectory`).
 Test dùng chung hạ tầng ở `src/test/java/com/ticket2h/support` (IntegrationTest, TestData, BulkData, MutableClock, Concurrency,
-FakeGateway, FakeIdentity, KafkaTestMessages). `BulkData` sinh hàng trăm nghìn dòng ngay trong PostgreSQL (`generate_series`).
+FakeGateway, FakeIdentity, KafkaTestMessages, SseClient). Redis trong test là `GenericContainer` (bean `redis`). `BulkData` sinh hàng trăm nghìn dòng ngay trong PostgreSQL (`generate_series`).
 Tài khoản test tạo bằng `TestData.user(...)` (nằm trong `FakeIdentity`, không trong database); token bằng `TestData.token(id)`.
